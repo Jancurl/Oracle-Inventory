@@ -1,20 +1,10 @@
 <script lang="ts">
+  import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { can } from '$lib/utils/permissions';
   import Breadcrumb from '$lib/components/Breadcrumb.svelte';
 
-  const CATEGORY_OPTIONS = [
-    { value: 'hand_tools', label: 'Hand tools' },
-    { value: 'power_tools', label: 'Power tools' },
-    { value: 'cables_connectors', label: 'Cables & connectors' },
-    { value: 'electrical_supplies', label: 'Electrical supplies' },
-    { value: 'consumables', label: 'Consumables' },
-    { value: 'safety_ppe', label: 'Safety & PPE' },
-    { value: 'spare_parts', label: 'Spare parts / accessories' },
-    { value: 'cleaning_supplies', label: 'Cleaning supplies' },
-    { value: 'other', label: 'Other' }
-  ];
   const UNIT_OPTIONS = [
     { value: 'piece', label: 'Piece' },
     { value: 'box', label: 'Box' },
@@ -29,23 +19,68 @@
     { value: 'other', label: 'Other' }
   ];
 
+  // Shared with Assets — Settings > Categories (see routes/categories.ts) —
+  // there's a single category list now, not a separate stock-only one.
+  interface CategoryOption { id: string; name: string; _count: { assets: number }; }
+  let categoryOptions      = $state<CategoryOption[]>([]);
+  let categoryOptionsError = $state('');
+
   let name                = $state('');
-  let category             = $state('hand_tools');
+  let category             = $state('');
   let categoryOther        = $state('');
   let unitOfMeasure        = $state('piece');
   let unitOfMeasureOther   = $state('');
-  let description          = $state('');
+  let model                = $state('');
+  let color                = $state('');
+  let location              = $state('');
+  let acquisitionDate      = $state('');
+  let serial               = $state('');
+  let quantity: number | string = $state(''); // type="number" bind:value yields a number once filled, '' while empty
+  let remarks              = $state('');
+  let asOfDate              = $state('');
   let isSerialized         = $state(false);
   let saving               = $state(false);
   let error                = $state('');
   let idempotencyKey       = $state('');
 
+  // Matches the "Model: X · Color: Y · ..." shape the All Items table
+  // (see stock/+page.svelte's parseDetails) reads back out of description —
+  // there's no dedicated column for these in the schema, so they round-trip
+  // through this one free-text field. Blank fields are simply omitted.
+  //
+  // Quantity here is the *expected* count (what the record says should be
+  // on hand) — separate from the actual on-hand Count, which is derived
+  // from stock movements, not set here. All Items shows both plus the
+  // Variance between them.
+  function buildDescription(): string {
+    const parts: string[] = [];
+    const quantityStr = String(quantity ?? '').trim();
+    if (model.trim()) parts.push(`Model: ${model.trim()}`);
+    if (color.trim()) parts.push(`Color: ${color.trim()}`);
+    if (location.trim()) parts.push(`Location: ${location.trim()}`);
+    if (acquisitionDate) parts.push(`Acquisition Date: ${acquisitionDate}`);
+    if (serial.trim()) parts.push(`Serial: ${serial.trim()}`);
+    if (quantityStr) parts.push(`Quantity: ${quantityStr}`);
+    if (remarks.trim()) parts.push(`Remarks: ${remarks.trim()}`);
+    if (asOfDate) parts.push(`As Of Date: ${asOfDate}`);
+    return parts.join(' · ');
+  }
+
   async function submit() {
     error = '';
     const resolvedCategory = category === 'other' ? categoryOther.trim() : category;
     const resolvedUnit = unitOfMeasure === 'other' ? unitOfMeasureOther.trim() : unitOfMeasure;
-    if (!name.trim() || !resolvedCategory || !resolvedUnit) {
-      error = 'Item name, category, and unit of measure are required.';
+    // `quantity` is bound to a type="number" input — Svelte coerces that
+    // binding to a number (or '' when empty), not the string the $state
+    // declaration suggests, so it can't be treated like the other text
+    // fields here (calling .trim() on a number throws).
+    const quantityStr = String(quantity ?? '').trim();
+    if (!name.trim() || !resolvedCategory || !resolvedUnit || !model.trim() || !color.trim() || !location.trim() || !acquisitionDate || !serial.trim() || !quantityStr || !remarks.trim() || !asOfDate) {
+      error = 'Item name, category, unit of measure, model, color, location, acquisition date, serial number, quantity, remarks, and as-of date are required.';
+      return;
+    }
+    if (!Number.isFinite(Number(quantity)) || Number(quantity) < 0) {
+      error = 'Quantity must be a valid non-negative number.';
       return;
     }
     saving = true;
@@ -55,8 +90,8 @@
         name: name.trim(),
         category: resolvedCategory,
         unitOfMeasure: resolvedUnit,
-        description: description.trim() || undefined,
-        isSerialized
+        description: buildDescription() || undefined,
+        isSerialized: isSerialized || Boolean(serial.trim())
       }, { 'Idempotency-Key': idempotencyKey });
       await goto('/stock');
     } catch (caught) {
@@ -69,6 +104,17 @@
   function handleCancel() {
     goto('/stock');
   }
+
+  // Category dropdown is managed in Settings > Categories rather than
+  // hardcoded here — shared with Assets.
+  onMount(async () => {
+    try {
+      categoryOptions = await api.get<CategoryOption[]>('/api/categories');
+      if (categoryOptions.length > 0 && !category) category = categoryOptions[0].name;
+    } catch (caught) {
+      categoryOptionsError = caught instanceof Error ? caught.message : 'Unable to load categories.';
+    }
+  });
 </script>
 
 <svelte:head><title>Create Stock Item | Oracle Inventory</title></svelte:head>
@@ -111,10 +157,13 @@
             <div class="field">
               <label class="field-label" for="category">Category <span class="required">*</span></label>
               <select id="category" class="field-select" bind:value={category}>
-                {#each CATEGORY_OPTIONS as option}<option value={option.value}>{option.label}</option>{/each}
+                {#each categoryOptions as option}<option value={option.name}>{option.name}</option>{/each}
+                <option value="other">Other</option>
               </select>
+              {#if categoryOptionsError}<p class="field-hint-error">{categoryOptionsError}</p>{/if}
               {#if category === 'other'}
                 <input class="field-input" style="margin-top: 8px;" bind:value={categoryOther} placeholder="Enter category" maxlength="80" />
+                <p class="field-hint">Not saved to Settings &gt; Categories — add it there first if you'll reuse it.</p>
               {/if}
             </div>
             <div class="field">
@@ -132,10 +181,51 @@
             <input type="checkbox" class="checkbox" bind:checked={isSerialized} />
             <span class="checkbox-label">This stock is serialized</span>
           </label>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header">
+          <h2 class="card-title">Additional details</h2>
+          <p class="card-sub">Shown as their own columns in the All Items list.</p>
+        </div>
+        <div class="card-body">
+          <div class="fields-grid">
+            <div class="field">
+              <label class="field-label" for="model">Model <span class="required">*</span></label>
+              <input id="model" class="field-input" bind:value={model} maxlength="120" placeholder="e.g. GW5700" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="color">Color <span class="required">*</span></label>
+              <input id="color" class="field-input" bind:value={color} maxlength="60" placeholder="e.g. Blue" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="location">Location <span class="required">*</span></label>
+              <input id="location" class="field-input" bind:value={location} maxlength="120" placeholder="e.g. Motorpool Tool Storage" />
+              <p class="field-hint">A free-text label, not the storage location used by Assign/Movements — those still require a real Stock Location.</p>
+            </div>
+            <div class="field">
+              <label class="field-label" for="acquisition-date">Acquisition date <span class="required">*</span></label>
+              <input id="acquisition-date" type="date" class="field-input" bind:value={acquisitionDate} />
+            </div>
+            <div class="field">
+              <label class="field-label" for="serial">Serial number <span class="required">*</span></label>
+              <input id="serial" class="field-input" bind:value={serial} maxlength="120" placeholder="e.g. 23393600254" />
+            </div>
+            <div class="field">
+              <label class="field-label" for="quantity">Quantity <span class="required">*</span></label>
+              <input id="quantity" type="number" min="0" step="1" class="field-input" bind:value={quantity} placeholder="e.g. 1" />
+            </div>
+          </div>
 
           <div class="field field-textarea">
-            <label class="field-label" for="description">Description <span class="optional">(optional)</span></label>
-            <textarea id="description" class="field-textarea-input" bind:value={description} rows="4" maxlength="1000"></textarea>
+            <label class="field-label" for="remarks">Remarks <span class="required">*</span></label>
+            <textarea id="remarks" class="field-textarea-input" bind:value={remarks} rows="4" maxlength="1000" placeholder="e.g. Not working, missing, all complete…"></textarea>
+          </div>
+
+          <div class="field">
+            <label class="field-label" for="as-of-date">As of date <span class="required">*</span></label>
+            <input id="as-of-date" type="date" class="field-input" bind:value={asOfDate} />
           </div>
         </div>
       </section>
@@ -179,6 +269,7 @@
   .card { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--r-lg); }
   .card-header { padding: 16px 20px 12px; border-bottom: 1px solid var(--hairline); }
   .card-title { font-size: 14px; font-weight: 600; color: var(--ink); font-family: var(--font-sans); letter-spacing: -0.2px; }
+  .card-sub   { font-size: 12px; color: var(--mute); margin-top: 4px; font-family: var(--font-sans); }
   .card-body { padding: 20px; display: flex; flex-direction: column; gap: 16px; }
 
   .notice-card { padding: 20px; }
@@ -190,7 +281,8 @@
   .field { display: flex; flex-direction: column; gap: 6px; }
   .field-label { font-size: 12.5px; font-weight: 500; color: var(--body); font-family: var(--font-sans); letter-spacing: -0.1px; }
   .required { color: var(--error); }
-  .optional { color: var(--mute); font-weight: 400; }
+  .field-hint { font-size: 11.5px; color: var(--mute); margin-top: 4px; }
+  .field-hint-error { font-size: 11.5px; color: var(--error); margin-top: 4px; }
 
   .field-input, .field-select {
     height: 34px; padding: 0 10px;

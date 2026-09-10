@@ -189,6 +189,7 @@ model Employee {
   department     Department?       @relation(fields: [departmentId], references: [id])
   movementLogs   MovementLog[]
   stockMovements StockMovement[]
+  stockAssignments StockAssignment[]
 }
 
 model Asset {
@@ -800,6 +801,7 @@ model StockItem {
   movements          StockMovement[]
   policies           StockLevelPolicy[]
   countLines         StockCountLine[]
+  assignments        StockAssignment[]
 }
 
 model StockLocation {
@@ -814,9 +816,41 @@ model StockLocation {
   movements     StockLedgerEntry[]
   policies      StockLevelPolicy[]
   countSessions StockCountSession[]
+  assignments   StockAssignment[]
   branch        Branch              @relation(fields: [branchId], references: [id], onDelete: Restrict)
 
   @@index([branchId, archivedAt])
+}
+
+// Mirrors AssetAssignment's request/approve/reject return workflow, adapted
+// for quantity-managed stock: an "issue" StockMovement debits `quantity`
+// units from `locationId` when the assignment is created, and a "return"
+// StockMovement credits them back to the same location when it's returned —
+// so Tools & Stock's on-hand Count always reflects what's actually on the
+// shelf vs checked out, the same way it already does for ordinary movements.
+model StockAssignment {
+  id                String           @id @default(cuid())
+  stockItemId       String
+  employeeId        String
+  locationId        String
+  quantity          Decimal          @db.Decimal(18, 3)
+  status            AssignmentStatus @default(active)
+  assignedAt        DateTime         @default(now())
+  returnedAt        DateTime?
+  notes             String?
+  returnNotes       String?
+  returnRequestedAt DateTime?
+  returnRequestedBy String?
+  issueMovementId   String?          @unique
+  returnMovementId  String?          @unique
+  stockItem         StockItem        @relation(fields: [stockItemId], references: [id], onDelete: Restrict)
+  employee          Employee         @relation(fields: [employeeId], references: [id], onDelete: Restrict)
+  location          StockLocation    @relation(fields: [locationId], references: [id], onDelete: Restrict)
+  issueMovement     StockMovement?   @relation("StockAssignmentIssue", fields: [issueMovementId], references: [id])
+  returnMovement    StockMovement?   @relation("StockAssignmentReturn", fields: [returnMovementId], references: [id])
+
+  @@index([employeeId, status])
+  @@index([stockItemId, status])
 }
 
 model StockMovement {
@@ -841,6 +875,8 @@ model StockMovement {
   approvedBy         SystemUser?        @relation("StockMovementApprovedBy", fields: [approvedById], references: [id], onDelete: Restrict)
   relatedEmployee    Employee?          @relation(fields: [relatedEmployeeId], references: [id], onDelete: SetNull)
   relatedAsset       Asset?             @relation(fields: [relatedAssetId], references: [id], onDelete: SetNull)
+  assignmentIssued   StockAssignment?   @relation("StockAssignmentIssue")
+  assignmentReturned StockAssignment?   @relation("StockAssignmentReturn")
 
   @@index([stockItemId, createdAt])
 }

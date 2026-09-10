@@ -156,7 +156,7 @@
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <button class="crumb-link" onclick={() => goto('/dashboard')}>Dashboard</button>
     <svg class="crumb-sep" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-    <button class="crumb-link" onclick={() => goto('/assignments')}>Assignments</button>
+    <button class="crumb-link" onclick={() => goto('/assignments')}>Asset Assignments</button>
     <svg class="crumb-sep" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
     <span class="crumb-current">Confirm</span>
   </nav>

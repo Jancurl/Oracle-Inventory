@@ -229,7 +229,9 @@
     }
   });
 
-
+  // Stock item categories were previously a separate StockCategory table/panel
+  // — merged into this same Category list (Settings > Categories) so there's
+  // one place to manage categories, not two. See routes/categories.ts.
 
   /* ── Sliding pill ── */
   let itemRefs: Record<string, HTMLButtonElement> = $state({});
@@ -251,7 +253,7 @@
       { id: 'general',       label: 'General' },
     ]},
     { section: 'INVENTORY', items: [
-      { id: 'categories',    label: 'Categories'       },
+      { id: 'categories', label: 'Categories' },
     ]},
   ];
 
@@ -489,7 +491,7 @@
         <div class="panel">
           <div class="panel-header">
             <h2 class="panel-title">Categories</h2>
-            <p class="panel-sub">Manage asset categories used across the inventory.</p>
+            <p class="panel-sub">Manage the categories used across the inventory, including on the "Create stock item" form.</p>
           </div>
 
           <!-- Add new category -->

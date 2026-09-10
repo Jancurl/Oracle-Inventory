@@ -163,12 +163,12 @@
   <nav class="breadcrumb" aria-label="Breadcrumb">
     <button class="crumb-link" onclick={() => goto('/dashboard')}>Dashboard</button>
     <svg class="crumb-sep" width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-    <span class="crumb-current">Assignments</span>
+    <span class="crumb-current">Asset Assignments</span>
   </nav>
 
   <div class="page-header">
     <div>
-      <h1 class="page-title">Assignments</h1>
+      <h1 class="page-title">Asset Assignments</h1>
       <p class="page-sub">Track and manage asset assignments across your organization</p>
     </div>
     {#if can('manage_stock')}

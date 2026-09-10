@@ -1,6 +1,10 @@
 import { Router, Response } from "express";
+import multer from "multer";
+import path from "path";
+import crypto from "crypto";
+import XLSX from "xlsx";
 import { prisma } from "../lib/prisma";
-import { AuthRequest, requireAuth, requirePermission } from "../middleware/auth";
+import { AuthRequest, requireAuth, requirePermission, requireSuperAdmin } from "../middleware/auth";
 import { broadcastChange } from "../lib/ws";
 
 const router = Router(); const featureKey = "stock.tools.v1";
@@ -25,6 +29,10 @@ async function nextSku(category: string): Promise<string> {
   const count = await prisma.stockItem.count({ where: { category } });
   return `${prefix}-${String(count + 1).padStart(4, "0")}`;
 }
+
+// Stock item categories are managed through the shared Category model —
+// see routes/categories.ts (Settings > Categories) — merged in from the
+// short-lived separate StockCategory table so there's one list, not two.
 
 router.post("/items", requirePermission("manage_stock"), async (req: AuthRequest, res) => {
   if (!(await enabled())) return gate(res);
@@ -138,6 +146,12 @@ router.post("/movements", requirePermission("manage_stock"), async (req: AuthReq
   }
 });
 router.get("/items/:id", requirePermission("view_stock"), async (req: AuthRequest, res) => { if (!(await enabled())) return gate(res); const item = await prisma.stockItem.findUnique({ where: { id: req.params.id }, include: { policies: { include: { location: true } } } }); if (!item) return res.status(404).json({ error: "Stock item not found." }); return res.json(item); });
+// Archive, not hard-delete: sets active=false so the item drops out of All Items'
+// default `where: { active: true }` immediately, but its movements/ledger
+// history and past assignments are preserved and this is reversible via
+// POST /items/:id/restore. Super Admin only — stricter than manage_stock.
+router.delete("/items/:id", requireSuperAdmin, async (req: AuthRequest, res: Response) => { if (!(await enabled())) return gate(res); const item = await prisma.stockItem.findUnique({ where: { id: req.params.id } }); if (!item) return res.status(404).json({ error: "Stock item not found." }); if (!item.active) return res.status(409).json({ error: "Stock item is already archived.", code: "STOCK_ITEM_ALREADY_ARCHIVED" }); const updated = await prisma.stockItem.update({ where: { id: item.id }, data: { active: false, archivedAt: new Date() } }); await prisma.activityLog.create({ data: { userId: req.user!.id, action: "stock_item_archived", entity: "StockItem", entityId: item.id, metadata: { name: item.name, sku: item.sku } } }); broadcastChange({ entity: "StockItem", action: "stock_item_archived", entityId: item.id, branchId: null }); return res.json(updated); });
+router.post("/items/:id/restore", requireSuperAdmin, async (req: AuthRequest, res: Response) => { if (!(await enabled())) return gate(res); const item = await prisma.stockItem.findUnique({ where: { id: req.params.id } }); if (!item) return res.status(404).json({ error: "Stock item not found." }); if (item.active) return res.status(409).json({ error: "Stock item is not archived.", code: "STOCK_ITEM_NOT_ARCHIVED" }); const updated = await prisma.stockItem.update({ where: { id: item.id }, data: { active: true, archivedAt: null } }); await prisma.activityLog.create({ data: { userId: req.user!.id, action: "stock_item_restored", entity: "StockItem", entityId: item.id, metadata: { name: item.name, sku: item.sku } } }); broadcastChange({ entity: "StockItem", action: "stock_item_restored", entityId: item.id, branchId: null }); return res.json(updated); });
 router.get("/items/:id/movements", requirePermission("view_stock"), async (req: AuthRequest, res) => { if (!(await enabled())) return gate(res); const account = await prisma.systemUser.findUnique({ where: { id: req.user!.id }, select: { branchId: true, role: { select: { name: true } } } }); const global = account?.role?.name.toLowerCase() === "super_admin"; const items = await prisma.stockLedgerEntry.findMany({ where: { movement: { stockItemId: req.params.id }, ...(global ? {} : { location: { branchId: account?.branchId ?? "" } }) }, include: { movement: true, location: true }, orderBy: { createdAt: "desc" } }); return res.json({ items, page: 1, pageSize: items.length, total: items.length }); });
 router.put("/policies/:id", requirePermission("manage_stock"), async (req: AuthRequest, res) => { if (!(await enabled())) return gate(res); const b = req.body as Record<string, unknown>; const min = Number(b.minimumQuantity); const reorder = Number(b.reorderQuantity); const expected = typeof b.expectedUpdatedAt === "string" ? new Date(b.expectedUpdatedAt) : null; if (!expected || Number.isNaN(expected.getTime()) || !Number.isFinite(min) || !Number.isFinite(reorder) || min < 0 || reorder < min) return res.status(400).json({ error: "Valid policy quantities and expectedUpdatedAt are required.", code: "INVALID_STOCK_POLICY" }); const current = await prisma.stockLevelPolicy.findUnique({ where: { id: req.params.id }, include: { location: true } }); if (!current) return res.status(404).json({ error: "Policy not found." }); const scope = await scopedLocation(req, current.locationId); if (!scope.allowed) return res.status(403).json({ error: "Policy is outside your scope." }); const saved = await prisma.stockLevelPolicy.updateMany({ where: { id: current.id, updatedAt: expected }, data: { minimumQuantity: min, reorderQuantity: reorder } }); if (saved.count !== 1) return res.status(409).json({ error: "Policy changed since it was loaded.", code: "STALE_WRITE" }); return res.json(await prisma.stockLevelPolicy.findUnique({ where: { id: current.id } })); });
 router.get("/count-sessions/:id", requirePermission("view_stock"), async (req: AuthRequest, res) => { if (!(await enabled())) return gate(res); const session = await prisma.stockCountSession.findUnique({ where: { id: req.params.id }, include: { location: true, lines: true } }); if (!session) return res.status(404).json({ error: "Count session not found." }); const scope = await scopedLocation(req, session.locationId); if (!scope.allowed) return res.status(403).json({ error: "Count is outside your scope." }); return res.json(session); });
@@ -233,5 +247,181 @@ router.post("/movements/transfer", requirePermission("manage_stock"), async (req
   } catch (error) { if (error instanceof Error && error.message === "NEGATIVE_STOCK") return res.status(409).json({ error: "Transfer would create negative stock.", code: "NEGATIVE_STOCK" }); if (error instanceof Error && error.message === "STOCK_ITEM_ARCHIVED") return res.status(409).json({ error: "Stock item is missing or archived.", code: "STOCK_ITEM_ARCHIVED" }); return res.status(409).json({ error: "Transfer conflict.", code: "STOCK_TRANSFER_CONFLICT" }); }
 });
 router.get("/branches/:branchId/summary", requirePermission("view_stock"), async (req: AuthRequest, res) => { if (!(await enabled())) return gate(res); const locations = await prisma.stockLocation.findMany({ where: { branchId: req.params.branchId, archivedAt: null } }); const items = await prisma.stockItem.findMany({ where: { active: true } }); const locationIds = locations.map((location) => location.id); const balances = await Promise.all(items.map(async (item) => { const rows = await prisma.stockLedgerEntry.findMany({ where: { movement: { stockItemId: item.id }, locationId: { in: locationIds } }, select: { quantityDelta: true } }); return { id: item.id, sku: item.sku, name: item.name, balance: rows.reduce((sum, row) => sum + Number(row.quantityDelta), 0) }; })); return res.json({ branchId: req.params.branchId, locations, items: balances }); });
+// ── Bulk import: Tools & Stock Excel template ────────────────────────────────
+// Fixed column layout matching the maintenance tools inventory spreadsheet:
+// Tool, Brand, Model, Color, Location, Acquisition Date, Serial Number, Quantity, Remarks.
+// LOCATION here mirrors the "Create stock item" form's field — a free-text
+// label folded into description, not the real StockLocation every row's
+// opening balance actually posts to (still IMPORT_LOCATION_NAME below).
+const IMPORT_CATEGORY = "Maintenance Tools";
+const IMPORT_HEADERS = ["TOOL", "BRAND", "MODEL", "COLOR", "LOCATION", "ACQUISITION DATE", "SERIAL NUMBER", "QUANTITY", "REMARKS"];
+const IMPORT_LOCATION_NAME = "Maintenance Tool Storage";
+
+const importUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const ext = path.extname(file.originalname).toLowerCase();
+    if (![".xlsx", ".xls"].includes(ext)) return cb(new Error("Unsupported file type. Allowed: .xlsx, .xls"));
+    cb(null, true);
+  },
+});
+
+function cleanCell(v: unknown): string | null {
+  const s = String(v ?? "").trim();
+  if (!s || s.toUpperCase() === "N/A") return null;
+  return s;
+}
+
+function excelDateToISO(v: unknown): Date | null {
+  if (v instanceof Date) return v;
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const parsed = XLSX.SSF.parse_date_code(n);
+  if (!parsed) return null;
+  return new Date(Date.UTC(parsed.y, parsed.m - 1, parsed.d));
+}
+
+router.get("/import/template", requirePermission("manage_stock"), async (_req: AuthRequest, res) => {
+  if (!(await enabled())) return gate(res);
+  const sample = ["Grinder", "Bosch", "GW5700", "Green", "Shelf A1", "", "", "1", ""];
+  const ws = XLSX.utils.aoa_to_sheet([IMPORT_HEADERS, sample]);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Tools");
+  const buf = XLSX.write(wb, { type: "buffer", bookType: "xlsx" }) as Buffer;
+  res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+  res.setHeader("Content-Disposition", 'attachment; filename="tools-stock-import-template.xlsx"');
+  return res.send(buf);
+});
+
+router.post("/import", requirePermission("manage_stock"), importUpload.single("file"), async (req: AuthRequest, res) => {
+  if (!(await enabled())) return gate(res);
+  if (!req.file) return res.status(400).json({ error: "An .xlsx or .xls file is required.", code: "IMPORT_FILE_REQUIRED" });
+
+  let rows: unknown[][];
+  try {
+    const wb = XLSX.read(req.file.buffer, { type: "buffer" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: "" });
+  } catch {
+    return res.status(400).json({ error: "Could not read the uploaded file.", code: "IMPORT_PARSE_FAILED" });
+  }
+
+  // Require the exact template header row — reject anything else outright.
+  // (A title row above the header, as in the source spreadsheet, is tolerated;
+  // a file that never contains this header is not this template and must not
+  // be silently parsed as if it were — that previously let an unrelated file
+  // get ingested as bogus stock rows.)
+  const headerRowIdx = rows.findIndex((r) =>
+    IMPORT_HEADERS.every((h, i) => String(r?.[i] ?? "").trim().toUpperCase() === h)
+  );
+  if (headerRowIdx < 0) {
+    return res.status(400).json({
+      error: `This file doesn't match the Tools & Stock template. Expected header row: ${IMPORT_HEADERS.join(", ")}.`,
+      code: "IMPORT_TEMPLATE_MISMATCH",
+    });
+  }
+  const dataRows = rows.slice(headerRowIdx + 1, headerRowIdx + 1 + 1000);
+
+  const account = await prisma.systemUser.findUnique({ where: { id: req.user!.id }, select: { branchId: true, role: { select: { name: true } } } });
+  const global = account?.role?.name.toLowerCase() === "super_admin";
+  const branchId = (typeof req.body?.branchId === "string" && req.body.branchId) || account?.branchId || (await prisma.branch.findFirst())?.id;
+  if (!branchId) return res.status(400).json({ error: "No branch is available to receive imported stock.", code: "IMPORT_NO_BRANCH" });
+  if (!global && account?.branchId && branchId !== account.branchId) return res.status(403).json({ error: "Branch is outside your scope.", code: "STOCK_BRANCH_FORBIDDEN" });
+
+  let location = await prisma.stockLocation.findFirst({ where: { name: IMPORT_LOCATION_NAME, branchId } });
+  if (!location) {
+    location = await prisma.stockLocation.create({ data: { branchId, name: IMPORT_LOCATION_NAME, locationType: "room", description: "Created by Tools & Stock Excel import." } });
+  }
+
+  let created = 0;
+  let skipped = 0;
+  const errors: { row: number; tool: string; message: string }[] = [];
+
+  for (let i = 0; i < dataRows.length; i++) {
+    const r = dataRows[i];
+    const tool = cleanCell(r[0]);
+    if (!tool) continue;
+    try {
+      const brand = cleanCell(r[1]);
+      const model = cleanCell(r[2]);
+      const color = cleanCell(r[3]);
+      const locationLabel = cleanCell(r[4]); // free-text, not the real StockLocation this row's ledger entry posts to (see `location` below)
+      const acquisitionDate = excelDateToISO(r[5]);
+      const serial = cleanCell(r[6]);
+      const qtyRaw = Number(r[7]);
+      const quantity = Number.isFinite(qtyRaw) && qtyRaw > 0 ? qtyRaw : 1;
+      const remarks = cleanCell(r[8]);
+      const disposed = /dispos/i.test(remarks ?? "");
+
+      // De-dupe against existing items: same tool name + serial (if present),
+      // else same tool name + brand + model, so re-uploading an updated copy
+      // of the sheet doesn't create duplicates for rows already imported.
+      const existing = await prisma.stockItem.findFirst({
+        where: serial
+          ? { name: tool, description: { contains: `Serial: ${serial}` } }
+          : { name: tool, description: { contains: [brand, model].filter(Boolean).join(" ") || tool } },
+      });
+      if (existing) { skipped++; continue; }
+
+      const descParts: string[] = [];
+      if (brand) descParts.push(`Brand: ${brand}`);
+      if (model) descParts.push(`Model: ${model}`);
+      if (color) descParts.push(`Color: ${color}`);
+      if (locationLabel) descParts.push(`Location: ${locationLabel}`);
+      if (serial) descParts.push(`Serial: ${serial}`);
+      if (acquisitionDate) descParts.push(`Acquired: ${acquisitionDate.toISOString().slice(0, 10)}`);
+      if (remarks) descParts.push(remarks);
+      const description = descParts.join(" · ") || null;
+
+      let sku = "";
+      let item;
+      for (let attempt = 0; attempt < 5 && !item; attempt++) {
+        sku = await nextSku(IMPORT_CATEGORY);
+        try {
+          item = await prisma.stockItem.create({
+            data: {
+              sku,
+              idempotencyKey: `stock-import-${crypto.randomUUID()}`,
+              requestFingerprint: JSON.stringify({ tool, brand, model, serial }),
+              name: tool,
+              category: IMPORT_CATEGORY,
+              unitOfMeasure: "pc",
+              description,
+              isSerialized: Boolean(serial),
+              active: !disposed,
+              archivedAt: disposed ? new Date() : null,
+            },
+          });
+        } catch { /* SKU collision on concurrent import — retry with next sequence */ }
+      }
+      if (!item) throw new Error("Could not generate a unique SKU.");
+
+      if (!disposed) {
+        const movement = await prisma.stockMovement.create({
+          data: {
+            stockItemId: item.id,
+            movementType: "opening",
+            quantity,
+            reason: "Opening balance — Tools & Stock Excel import.",
+            idempotencyKey: `stock-import-movement-${crypto.randomUUID()}`,
+            requestFingerprint: JSON.stringify({ stockItemId: item.id, quantity }),
+            performedById: req.user!.id,
+          },
+        });
+        await prisma.stockLedgerEntry.create({ data: { movementId: movement.id, locationId: location.id, quantityDelta: quantity } });
+      }
+      created++;
+    } catch (error) {
+      errors.push({ row: headerRowIdx + i + 2, tool, message: error instanceof Error ? error.message : "Unknown error" });
+    }
+  }
+
+  await prisma.activityLog.create({ data: { userId: req.user!.id, action: "stock_import_completed", entity: "StockItem", entityId: location.id, metadata: { created, skipped, errors: errors.length } } });
+  if (created > 0) broadcastChange({ entity: "StockItem", action: "stock_import_completed", entityId: location.id, branchId });
+
+  return res.json({ created, skipped, errors, locationId: location.id, locationName: location.name });
+});
+
 export default router;
 export { rejectSecret, unknown, enabled, gate };

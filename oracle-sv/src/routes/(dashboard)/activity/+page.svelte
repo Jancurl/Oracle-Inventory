@@ -3,9 +3,12 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { onChange } from '$lib/ws';
+  import { authStore } from '$lib/stores/auth.svelte';
   import DatePicker from '$lib/components/date/DatePicker.svelte';
   import Breadcrumb from '$lib/components/Breadcrumb.svelte';
   import Pagination from '$lib/components/Pagination.svelte';
+
+  const isSuperAdmin = $derived((authStore.user?.role ?? '').trim().toLowerCase() === 'super_admin');
 
   // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -134,6 +137,8 @@
     CATEGORY_UPDATED:     'warning',
     CATEGORY_DELETED:     'error',
     USER_LOGGED_IN:       'info',
+    stock_item_archived:  'error',
+    stock_item_restored:  'info',
   };
 
   function logLevel(action: string): 'info' | 'warning' | 'error' {
@@ -152,6 +157,25 @@
     return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
   }
 
+  // ── Restore a deleted (archived) stock item directly from its log entry ──────
+  let restoringId  = $state('');
+  let restoreErr   = $state<Record<string, string>>({});
+  let restoredIds  = $state(new Set<string>());
+
+  async function restoreStockItem(log: ActivityLog) {
+    if (!log.entityId) return;
+    restoringId = log.id;
+    restoreErr = { ...restoreErr, [log.id]: '' };
+    try {
+      await api.post(`/api/stock/items/${log.entityId}/restore`, {});
+      restoredIds = new Set([...restoredIds, log.id]);
+    } catch (e) {
+      restoreErr = { ...restoreErr, [log.id]: e instanceof Error ? e.message : 'Unable to restore item.' };
+    } finally {
+      restoringId = '';
+    }
+  }
+
   function buildMessage(log: ActivityLog): string {
     const action = log.action.replace(/_/g, ' ').toLowerCase();
     const entity = log.entity;
@@ -159,6 +183,8 @@
     const actor = log.user ? log.user.name : 'System';
 
     if (log.action === 'USER_LOGGED_IN') return `${actor} logged in`;
+    if (log.action === 'stock_item_archived') return `${actor} deleted stock item "${m.name}"${m.sku ? ` (${m.sku})` : ''}`;
+    if (log.action === 'stock_item_restored') return `${actor} restored stock item "${m.name}"${m.sku ? ` (${m.sku})` : ''}`;
     if (m.assetName && m.employeeName) return `${actor} assigned ${m.assetName} to ${m.employeeName}`;
     if (m.name)          return `${actor} ${action}: ${m.name} (${entity})`;
     if (m.collectedCount !== undefined) return `${actor} collected ${m.collectedCount} asset(s) during turnover`;
@@ -245,6 +271,7 @@
               <th class="th-user">User</th>
               <th class="th-ts">Timestamp</th>
               <th class="th-msg">Log Message</th>
+              {#if isSuperAdmin}<th class="th-actions">Actions</th>{/if}
             </tr>
           </thead>
           <tbody>
@@ -268,6 +295,20 @@
                 <td class="td-user">{log.user ? log.user.name : 'System'}</td>
                 <td class="td-ts">{formatTimestamp(log.createdAt)}</td>
                 <td class="td-msg">{buildMessage(log)}</td>
+                {#if isSuperAdmin}
+                  <td class="td-actions">
+                    {#if log.action === 'stock_item_archived'}
+                      {#if restoredIds.has(log.id)}
+                        <span class="restored-tag">Restored</span>
+                      {:else}
+                        <button class="btn-link" disabled={restoringId === log.id} onclick={() => restoreStockItem(log)}>
+                          {restoringId === log.id ? 'Restoring…' : 'Restore'}
+                        </button>
+                      {/if}
+                      {#if restoreErr[log.id]}<div class="restore-err">{restoreErr[log.id]}</div>{/if}
+                    {/if}
+                  </td>
+                {/if}
               </tr>
             {/each}
           </tbody>
@@ -467,6 +508,18 @@
 
   /* ── Message cell ── */
   .td-msg { color: var(--body); line-height: 1.4; }
+
+  /* ── Actions cell ── */
+  .th-actions { width: 100px; }
+  .td-actions { white-space: nowrap; }
+  .btn-link {
+    background: none; border: none; padding: 0; cursor: pointer;
+    font-size: 12.5px; font-weight: 500; color: var(--link); font-family: var(--font-sans);
+  }
+  .btn-link:hover:not(:disabled) { text-decoration: underline; }
+  .btn-link:disabled { opacity: 0.5; cursor: not-allowed; }
+  .restored-tag { font-size: 12.5px; color: var(--mute); font-style: italic; }
+  .restore-err { margin-top: 3px; font-size: 11.5px; color: var(--error); }
 
   /* ── Responsive ── */
   @media (max-width: 700px) {

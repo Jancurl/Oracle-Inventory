@@ -1,10 +1,8 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import NavIcon from './NavIcon.svelte';
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { authStore } from '$lib/stores/auth.svelte';
-  import { api } from '$lib/api';
 
   interface Props {
     mobileSidebarOpen?: boolean;
@@ -42,19 +40,17 @@
     {
       label: 'Inventory',
       items: [
+        { id: 'assignments', label: 'Asset Assignments', icon: 'clipboard', href: '/assignments', permission: 'view_inventory' },
         {
-          id: 'assets', label: 'Assets', icon: 'package', href: '/assets',
-          permission: 'view_inventory',
+          id: 'stock', label: 'Tools & Stock', icon: 'package', href: '/stock',
+          permission: 'view_stock',
           children: [
-            { id: 'assets-all',    label: 'All Assets',    href: '/assets',        permission: 'view_inventory' },
-            { id: 'assets-add',    label: 'Add Asset',     href: '/assets/add',    permission: 'create_inventory' },
-            { id: 'assets-import', label: 'Import Assets', href: '/assets/import', permission: 'import_inventory' },
+            { id: 'stock-all',       label: 'All Items',     href: '/stock',                          permission: 'view_stock' },
+            { id: 'stock-add',       label: 'Add Item',      href: '/inventory/intake/tools-stock',   permission: 'manage_stock' },
+            { id: 'assets-import',   label: 'Import Assets', href: '/assets/import',                  permission: 'manage_stock' },
           ],
         },
-        { id: 'assignments', label: 'Assignments', icon: 'clipboard', href: '/assignments', permission: 'view_inventory' },
-        { id: 'hardware-audit', label: 'Hardware Audit', icon: 'cpu', href: '/hardware-audit', permission: 'view_inventory' },
-        { id: 'cctv', label: 'CCTV & NVR', icon: 'analytics', href: '/cctv', permission: 'view_inventory' },
-        { id: 'network', label: 'Network', icon: 'analytics', href: '/network', permission: 'view_inventory' },
+        { id: 'stock-assign', label: 'Stock Assignments', icon: 'clipboard', href: '/stock/assignments', permission: 'view_stock' },
       ],
     },
     {
@@ -114,14 +110,6 @@
 
   let expanded = $state(true);
   let openIds  = $state(new Set<string>());
-
-  // Red-dot badge on Hardware Audit while pending mismatches await review
-  let hwPendingMismatches = $state(0);
-  onMount(async () => {
-    if (!allowed('view_inventory')) return;
-    const badge = await api.get<{ pendingMismatches: number }>('/api/hardware-audit/badge').catch(() => null);
-    hwPendingMismatches = badge?.pendingMismatches ?? 0;
-  });
 
   // Derive active state from the current URL
   const pathname = $derived($page.url.pathname);
@@ -246,9 +234,6 @@
             <NavIcon name={item.icon} size={18} />
           </span>
           <span class="item-label">{item.label}</span>
-          {#if item.id === 'hardware-audit' && hwPendingMismatches > 0}
-            <span class="alert-dot" title="{hwPendingMismatches} pending mismatch{hwPendingMismatches === 1 ? '' : 'es'}" aria-label="{hwPendingMismatches} pending mismatches"></span>
-          {/if}
           {#if item.children?.length}
             <span class="item-badge" aria-hidden="true">
               {openIds.has(item.id) ? '−' : '+'}
@@ -473,14 +458,6 @@
 
   .nav-item.active .item-badge {
     background: oklch(100% 0 0 / 18%);
-  }
-
-  .alert-dot {
-    width: 8px;
-    height: 8px;
-    border-radius: 999px;
-    background: var(--error);
-    flex-shrink: 0;
   }
 
   /* ── Sub-items ──────────────────────────────────────────────────────── */

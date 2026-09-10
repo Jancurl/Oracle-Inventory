@@ -71,6 +71,12 @@
     network:       { enabled: false } | { enabled: true; accessPoints: number; switches: number };
     infrastructure: { enabled: false } | { enabled: true; servers: number; firewalls: number | null; ispCircuits: number };
   }
+  interface StockSummary {
+    totalItems:        number;
+    unitsOnHand:       number;
+    categories:        number;
+    activeAssignments: number;
+  }
 
   // ── State ──────────────────────────────────────────────────────────────────
   let summary       = $state<Summary | null>(null);
@@ -78,6 +84,7 @@
   let trend         = $state<TrendMonth[]>([]);
   let frequentAssets = $state<FrequentAsset[]>([]);
   let infra         = $state<InfraSummary | null>(null);
+  let stock         = $state<StockSummary | null>(null);
   let loading       = $state(true);
   let search        = $state('');
   let dateFrom      = $state('');
@@ -194,9 +201,26 @@
   }
 
   // ── Data fetch ─────────────────────────────────────────────────────────────
+  async function loadStockSummary(): Promise<StockSummary | null> {
+    if (!can('view_stock')) return null;
+    const [itemsRes, assignRes, catsRes] = await Promise.all([
+      api.get<{ items: { balance: number }[]; total: number }>('/api/stock/items?pageSize=100').catch(() => null),
+      api.get<{ active: number }>('/api/stock/assignments/stats').catch(() => null),
+      api.get<{ id: string }[]>('/api/categories').catch(() => null),
+    ]);
+    if (!itemsRes) return null; // Tools & Stock disabled for this environment, or no permission
+    return {
+      totalItems:        itemsRes.total,
+      unitsOnHand:        itemsRes.items.reduce((sum, i) => sum + i.balance, 0),
+      categories:         catsRes?.length ?? 0,
+      activeAssignments:  assignRes?.active ?? 0,
+    };
+  }
+
+  // ── Data fetch ─────────────────────────────────────────────────────────────
   async function loadDashboard() {
     // Fetch independently — a 403 on one endpoint must not blank the others
-    const [, act, trd, freq, inf] = await Promise.all([
+    const [, act, trd, freq, inf, stk] = await Promise.all([
       loadSummary(),
       can('access_logs')
         ? api.get<{ logs: ActivityLog[] }>('/api/activity?limit=15').catch(() => null)
@@ -206,16 +230,18 @@
       can('view_reports')
         ? api.get<InfraSummary>('/api/reports/infrastructure-summary').catch(() => null)
         : Promise.resolve(null),
+      loadStockSummary(),
     ]);
     if (act)  activities     = act.logs;
     if (trd)  trend          = trd.months;
     if (freq) frequentAssets = freq.assets;
     if (inf)  infra          = inf;
+    if (stk)  stock          = stk;
     loading = false;
   }
 
   onMount(() => { void loadDashboard(); });
-  onDestroy(onChange(['Asset', 'Assignment', 'Employee'], () => loadDashboard()));
+  onDestroy(onChange(['Asset', 'Assignment', 'Employee', 'StockItem', 'StockAssignment', 'Category'], () => loadDashboard()));
 
   const hasInfraSection = $derived(
     infra !== null && (infra.cctv.enabled || infra.network.enabled || infra.infrastructure.enabled)
@@ -256,21 +282,21 @@
       helper="All inventory items"
       value={kpi.totalAssets.toLocaleString()}
       {loading}
-      href="/assets"
+      href={can('view_stock') ? '/stock' : undefined}
     />
     <StatCard
       label="Assigned"
       helper="Currently in use"
       value={kpi.assigned.toLocaleString()}
       {loading}
-      href={can('view_inventory') ? '/assignments' : undefined}
+      href={can('view_stock') ? '/stock/assignments' : undefined}
     />
     <StatCard
       label="Available"
       helper="Ready to assign"
       value={kpi.available.toLocaleString()}
       {loading}
-      href={can('view_inventory') ? '/assets' : undefined}
+      href={can('view_stock') ? '/stock' : undefined}
     />
   </div>
 
@@ -293,9 +319,43 @@
       helper="Mismatches awaiting review"
       value={(infra?.hardwareAudit.pendingMismatches ?? 0).toLocaleString()}
       loading={loading && !infra}
-      href={can('view_inventory') ? '/hardware-audit' : undefined}
     />
   </div>
+
+  <!-- ── Tools & Stock — separate from Assets above, same underlying inventory ── -->
+  {#if can('view_stock')}
+    <div class="section-label">Tools & Stock</div>
+    <div class="stat-row stat-row--4">
+      <StatCard
+        label="Stock Items"
+        helper="Distinct SKUs tracked"
+        value={(stock?.totalItems ?? 0).toLocaleString()}
+        loading={loading && !stock}
+        href="/stock"
+      />
+      <StatCard
+        label="Units On Hand"
+        helper="Summed across all items"
+        value={(stock?.unitsOnHand ?? 0).toLocaleString()}
+        loading={loading && !stock}
+        href="/stock"
+      />
+      <StatCard
+        label="Active Assignments"
+        helper="Tools currently checked out"
+        value={(stock?.activeAssignments ?? 0).toLocaleString()}
+        loading={loading && !stock}
+        href="/stock/assignments"
+      />
+      <StatCard
+        label="Categories"
+        helper="Shared with Assets"
+        value={(stock?.categories ?? 0).toLocaleString()}
+        loading={loading && !stock}
+        href={can('manage_settings') ? '/settings?tab=categories' : undefined}
+      />
+    </div>
+  {/if}
 
   <!-- ── Charts row ───────────────────────────────────────────────────────── -->
   <div class="two-col">
@@ -685,6 +745,17 @@
 
   .stat-row--3 { grid-template-columns: repeat(3, 1fr); }
   .stat-row--2 { grid-template-columns: repeat(2, 1fr); }
+  .stat-row--4 { grid-template-columns: repeat(4, 1fr); }
+
+  .section-label {
+    font-size: 11px;
+    font-weight: 600;
+    color: var(--mute);
+    font-family: var(--font-mono);
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    margin-top: 4px;
+  }
 
   /* ── Two column layout ── */
   .two-col {
@@ -984,10 +1055,12 @@
   /* ── Responsive ── */
   @media (max-width: 900px) {
     .two-col { grid-template-columns: 1fr; }
+    .stat-row--4 { grid-template-columns: 1fr 1fr; }
   }
 
   @media (max-width: 640px) {
     .stat-row--3 { grid-template-columns: 1fr 1fr; }
     .stat-row--2 { grid-template-columns: 1fr; }
+    .stat-row--4 { grid-template-columns: 1fr; }
   }
 </style>

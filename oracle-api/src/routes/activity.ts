@@ -27,7 +27,7 @@ const ENTITY_CATEGORIES: { key: string; label: string; entities: string[] }[] = 
   },
   {
     key: "stock", label: "Stock",
-    entities: ["StockMovement", "StockCountSession"],
+    entities: ["StockItem", "StockMovement", "StockCountSession", "StockAssignment"],
   },
   {
     key: "people", label: "Employees & Departments",
