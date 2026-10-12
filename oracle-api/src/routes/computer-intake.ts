@@ -37,6 +37,16 @@ export function validateIntake(v: unknown): Record<string, string> {
   }
   return errors;
 }
+// The form only shows `error`, so say which input is wrong and how to fix it.
+export function rejectionMessage(errors: Record<string, string>, v: unknown): string {
+  const [field, problem] = Object.entries(errors)[0] ?? [];
+  if (field === "ownership") return "Computer and laptop specs can only be saved for company-owned devices. Set Ownership to Company.";
+  const component = /^components\.(\d+)\.(\w+)$/.exec(field ?? "");
+  if (component) return component[2] === "capacity" ? `RAM/Storage row ${Number(component[1]) + 1}: capacity must be a number, for example 8 or 512.` : `RAM/Storage row ${Number(component[1]) + 1}: ${component[2]} — ${problem}`;
+  if (field) return `${field}: ${problem}`;
+  if (secret(v)) return "Passwords, keys and other credentials cannot be stored in inventory fields. Remove them from the text and try again.";
+  return "Only approved inventory fields are accepted.";
+}
 function dates(data: Intake, key: string) { return data[key] ? new Date(data[key]) : null; }
 function normalize(data: Intake): Intake {
   const cleaned: Intake = { ...data, name: typeof data.name === "string" ? data.name.trim() : data.name, assetTag: typeof data.assetTag === "string" ? data.assetTag.trim() || undefined : data.assetTag, components: Array.isArray(data.components) ? data.components.map((c: Intake) => ({ ...c, slotOrBay: c.slotOrBay?.trim() || undefined, brand: c.brand?.trim() || undefined, model: c.model?.trim() || undefined, serialNumber: c.serialNumber?.trim() || undefined, capacity: c.capacity?.trim() || undefined, storageKind: c.storageKind?.trim().toLowerCase() || undefined })) : [] };
@@ -90,14 +100,14 @@ router.get("/drafts", async (req: AuthRequest, res) => res.json(await prisma.com
 router.get("/drafts/:id", async (req: AuthRequest, res) => { const row = await prisma.computerIntakeDraft.findFirst({ where: { id: req.params.id, createdById: req.user!.id } }); if (!row) { res.status(404).json({ error: "Draft not found." }); return; } res.json(row); });
 router.get("/drafts/:id/preflight", async (req: AuthRequest, res) => { const row = await prisma.computerIntakeDraft.findFirst({ where: { id: req.params.id, createdById: req.user!.id, status: "draft" } }); if (!row || !record(row.data)) { res.status(404).json({ error: "Draft not found." }); return; } const data = normalize(row.data as Intake); const [tag, name] = await Promise.all([data.assetTag ? normalizedAssetTagExists(data.assetTag) : false, data.computerName && data.branchId ? prisma.asset.findFirst({ where: { branchId: data.branchId, computerName: { equals: data.computerName, mode: "insensitive" } }, select: { id: true } }) : null]); res.json({ assetTagAvailable: !tag, duplicateComputerName: Boolean(name), updatedAt: row.updatedAt.toISOString() }); });
 router.post("/drafts", async (req: AuthRequest, res) => {
-  const errors = validateIntake(req.body); if (Object.keys(errors).length || secret(req.body) || unknown(req.body)) { res.status(400).json({ error: "Only approved inventory fields are accepted.", fields: errors }); return; }
+  const errors = validateIntake(req.body); if (Object.keys(errors).length || secret(req.body) || unknown(req.body)) { res.status(400).json({ error: rejectionMessage(errors, req.body), fields: errors }); return; }
   const data = normalize(req.body); if (data.branchId && !(await scopedBranch(req, data.branchId))) { res.status(403).json({ error: "Branch is outside your scope." }); return; }
   const row = await prisma.$transaction(async (tx) => { const draft = await tx.computerIntakeDraft.create({ data: { createdById: req.user!.id, branchId: data.branchId ?? null, data } }); await tx.activityLog.create({ data: { userId: req.user!.id, action: "create", entity: "ComputerIntakeDraft", entityId: draft.id, metadata: { source: "manual", provenance: "manual-intake-draft", operationReason: "draft-created", changedFields: Object.keys(data).filter((key) => key !== "components"), branchId: data.branchId ?? null } } }); return draft; });
   res.status(201).json(row);
 });
 router.put("/drafts/:id", async (req: AuthRequest, res) => {
   const { expectedUpdatedAt: _expectedUpdatedAt, ...payload } = record(req.body) ? req.body as Intake : {};
-  const errors = validateIntake(payload); if (Object.keys(errors).length || secret(payload) || unknown(payload)) { res.status(400).json({ error: "Only approved inventory fields are accepted.", fields: errors }); return; }
+  const errors = validateIntake(payload); if (Object.keys(errors).length || secret(payload) || unknown(payload)) { res.status(400).json({ error: rejectionMessage(errors, payload), fields: errors }); return; }
   const current = await prisma.computerIntakeDraft.findFirst({ where: { id: req.params.id, createdById: req.user!.id, status: "draft" } }); if (!current) { res.status(404).json({ error: "Draft not found." }); return; }
   const tag = expected(req); if (!matchesExpected(tag, current.updatedAt)) { res.status(409).json({ error: "STALE_WRITE", code: "STALE_WRITE", currentUpdatedAt: current.updatedAt.toISOString() }); return; }
   const data = normalize(payload); if (data.branchId && !(await scopedBranch(req, data.branchId))) { res.status(403).json({ error: "Branch is outside your scope." }); return; }
@@ -115,7 +125,7 @@ router.post("/drafts/:id/submit", async (req: AuthRequest, res) => {
   }
   if (!matchesExpected(expectedUpdatedAt, draft.updatedAt)) { res.status(409).json({ error: "STALE_WRITE", code: "STALE_WRITE", currentUpdatedAt: draft.updatedAt.toISOString() }); return; }
   if (draft.status !== "draft" || !record(draft.data) || !record(req.body)) { res.status(409).json({ error: "Draft is not submittable." }); return; }
-  const data = normalize({ ...draft.data, ...cleanSubmitBody }); const errors = validateIntake(data); if (Object.keys(errors).length || secret(data) || unknown(data)) { res.status(400).json({ error: "Only approved inventory fields are accepted.", fields: errors }); return; }
+  const data = normalize({ ...draft.data, ...cleanSubmitBody }); const errors = validateIntake(data); if (Object.keys(errors).length || secret(data) || unknown(data)) { res.status(400).json({ error: rejectionMessage(errors, data), fields: errors }); return; }
   if (!data.name) { res.status(400).json({ error: "Computer name is required." }); return; }
   if (!data.branchId || !(await scopedBranch(req, data.branchId))) { res.status(400).json({ error: "An active branch is required." }); return; }
   if (!(await canSubmit(req, data.branchId))) { res.status(403).json({ error: "Only a branch Admin or Super Admin may submit." }); return; }

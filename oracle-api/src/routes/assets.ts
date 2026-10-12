@@ -1,5 +1,6 @@
 import { Router, Response } from "express";
 import multer from "multer";
+import { Prisma } from "../generated/prisma/client";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission, AuthRequest } from "../middleware/auth";
 import { logActivity } from "../lib/activity";
@@ -16,6 +17,7 @@ const ATTACHMENT_MIME_TYPES = new Set([
   "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
   "image/jpeg",
   "image/png",
+  "image/webp",
 ]);
 const attachmentUpload = multer({
   storage: multer.memoryStorage(),
@@ -37,6 +39,29 @@ const include = {
   deviceProfile: true,
   components: true,
 };
+// Date pickers send "YYYY-MM-DD"; Prisma only accepts a Date or a full ISO
+// timestamp. Returns undefined for a value that is not a real date.
+function parseDateInput(value: unknown): Date | null | undefined {
+  if (value === null || value === undefined || value === "") return null;
+  if (typeof value !== "string") return undefined;
+  const parsed = new Date(value);
+  return Number.isNaN(parsed.getTime()) ? undefined : parsed;
+}
+
+// Vendor and internal notes have no column of their own; they are kept in
+// the asset's metadata JSON next to whatever an import stored there. Returns
+// undefined when the request sends neither, so metadata is left untouched.
+function withDetailFields(existing: unknown, body: { vendor?: unknown; internalNotes?: unknown }): Record<string, unknown> | undefined {
+  if (body.vendor === undefined && body.internalNotes === undefined) return undefined;
+  const metadata: Record<string, unknown> = existing && typeof existing === "object" && !Array.isArray(existing) ? { ...(existing as Record<string, unknown>) } : {};
+  for (const key of ["vendor", "internalNotes"] as const) {
+    if (body[key] === undefined) continue;
+    const value = typeof body[key] === "string" ? (body[key] as string).trim() : "";
+    if (value) metadata[key] = value; else delete metadata[key];
+  }
+  return metadata;
+}
+
 async function scopedAssetWhere(req: AuthRequest) {
   const user = await prisma.systemUser.findUnique({ where: { id: req.user!.id }, select: { branchId: true, role: { select: { name: true } } } });
   return user?.role?.name?.trim().toLowerCase() === "super_admin" ? {} : { branchId: user?.branchId ?? "__no_branch__" };
@@ -112,21 +137,32 @@ router.get("/:id", requirePermission("view_inventory"), async (req: AuthRequest,
 
 // POST /api/assets
 router.post("/", requirePermission("create_inventory"), async (req: AuthRequest, res: Response) => {
-  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, nextMaintenanceDate, imeiNumber, propertyTag } = req.body;
+  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, purchaseDate, nextMaintenanceDate, imeiNumber, propertyTag } = req.body;
   if (!name) { res.status(400).json({ error: "Asset name is required." }); return; }
   if (!branchId) { res.status(400).json({ error: "Branch is required." }); return; }
+
+  const warrantyDate = parseDateInput(warrantyExpiry);
+  const purchasedOn = parseDateInput(purchaseDate);
+  const maintenanceDate = parseDateInput(nextMaintenanceDate);
+  if (warrantyDate === undefined) { res.status(400).json({ error: "Warranty expiry must be a valid date." }); return; }
+  if (purchasedOn === undefined) { res.status(400).json({ error: "Purchase date must be a valid date." }); return; }
+  if (maintenanceDate === undefined) { res.status(400).json({ error: "Next maintenance date must be a valid date." }); return; }
+
+  const metadata = withDetailFields(null, req.body);
 
   const asset = await prisma.asset.create({
     data: {
       name,
+      ...(metadata && Object.keys(metadata).length ? { metadata: metadata as Prisma.InputJsonObject } : {}),
       serialNumber: serialNumber || null,
       categoryId: categoryId || null,
       branchId: branchId || null,
       condition: condition ?? "usable",
       ownership: ownership ?? "company",
       description: description || null,
-      warrantyExpiry: warrantyExpiry || null,
-      nextMaintenanceDate: nextMaintenanceDate || null,
+      warrantyExpiry: warrantyDate,
+      purchaseDate: purchasedOn,
+      nextMaintenanceDate: maintenanceDate,
       imeiNumber: imeiNumber || null,
       propertyTag: propertyTag || null,
     },
@@ -139,24 +175,35 @@ router.post("/", requirePermission("create_inventory"), async (req: AuthRequest,
 
 // PUT /api/assets/:id
 router.put("/:id", requirePermission("edit_inventory"), async (req: AuthRequest, res: Response) => {
-  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, nextMaintenanceDate, imeiNumber, propertyTag } = req.body;
+  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, purchaseDate, nextMaintenanceDate, imeiNumber, propertyTag } = req.body;
   if (!name) { res.status(400).json({ error: "Asset name is required." }); return; }
+
+  const warrantyDate = parseDateInput(warrantyExpiry);
+  const purchasedOn = parseDateInput(purchaseDate);
+  const maintenanceDate = parseDateInput(nextMaintenanceDate);
+  if (warrantyDate === undefined) { res.status(400).json({ error: "Warranty expiry must be a valid date." }); return; }
+  if (purchasedOn === undefined) { res.status(400).json({ error: "Purchase date must be a valid date." }); return; }
+  if (maintenanceDate === undefined) { res.status(400).json({ error: "Next maintenance date must be a valid date." }); return; }
 
   const existing = await prisma.asset.findUnique({ where: { id: req.params.id } });
   if (!existing) { res.status(404).json({ error: "Asset not found" }); return; }
+
+  const metadata = withDetailFields(existing.metadata, req.body);
 
   const asset = await prisma.asset.update({
     where: { id: req.params.id },
     data: {
       name,
+      ...(metadata ? { metadata: Object.keys(metadata).length ? (metadata as Prisma.InputJsonObject) : Prisma.DbNull } : {}),
       serialNumber: serialNumber || null,
       categoryId: categoryId || null,
       branchId: branchId || null,
       condition: condition ?? existing.condition,
       ownership: ownership ?? existing.ownership,
       description: description || null,
-      warrantyExpiry: warrantyExpiry !== undefined ? (warrantyExpiry || null) : existing.warrantyExpiry,
-      nextMaintenanceDate: nextMaintenanceDate !== undefined ? (nextMaintenanceDate || null) : existing.nextMaintenanceDate,
+      warrantyExpiry: warrantyExpiry !== undefined ? warrantyDate : existing.warrantyExpiry,
+      purchaseDate: purchaseDate !== undefined ? purchasedOn : existing.purchaseDate,
+      nextMaintenanceDate: nextMaintenanceDate !== undefined ? maintenanceDate : existing.nextMaintenanceDate,
       imeiNumber: imeiNumber !== undefined ? (imeiNumber || null) : existing.imeiNumber,
       propertyTag: propertyTag !== undefined ? (propertyTag || null) : existing.propertyTag,
     },
@@ -346,7 +393,7 @@ router.post("/:id/recover", requirePermission("edit_inventory"), async (req: Aut
 router.post("/:id/attachments", requirePermission("edit_inventory"), attachmentUpload.single("file"), async (req: AuthRequest, res: Response) => {
   const asset = await prisma.asset.findFirst({ where: { id: req.params.id, ...(await scopedAssetWhere(req)) } });
   if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
-  if (!req.file) { res.status(400).json({ error: "A file is required, and must be one of: PDF, CSV, ZIP, DOCX, XLSX, JPEG, PNG (max 5MB)." }); return; }
+  if (!req.file) { res.status(400).json({ error: "A file is required, and must be one of: PDF, CSV, ZIP, DOCX, XLSX, JPEG, PNG, WebP (max 5MB)." }); return; }
 
   const attachment = await prisma.assetAttachment.create({
     data: {

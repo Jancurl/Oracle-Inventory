@@ -29,6 +29,7 @@
     email:        string | null;
     phone:        string | null;
     employeeId:   string | null;
+    position:     string | null;
     isActive:     boolean;
     source:       EmpSource;
     createdAt:    string;
@@ -55,7 +56,7 @@
   let editMode = $state(false);
   let saving   = $state(false);
   let saveErr  = $state('');
-  let draft    = $state({ name: '', employeeId: '', email: '', phone: '', branchId: '', departmentId: '' });
+  let draft    = $state({ name: '', employeeId: '', position: '', email: '', phone: '', branchId: '', departmentId: '' });
 
   // ── Modal state ──────────────────────────────────────────────────────────────
 
@@ -119,6 +120,7 @@
     draft = {
       name:         employee.name,
       employeeId:   employee.employeeId  ?? '',
+      position:     employee.position    ?? '',
       email:        employee.email       ?? '',
       phone:        employee.phone       ?? '',
       branchId:     employee.branch?.id  ?? '',
@@ -138,6 +140,7 @@
       employee = await api.put<Employee>(`/api/employees/${empId}`, {
         name:         draft.name.trim(),
         employeeId:   draft.employeeId.trim(),
+        position:     draft.position.trim()     || null,
         email:        draft.email.trim()        || null,
         phone:        draft.phone.trim()        || null,
         branchId:     draft.branchId            || null,
@@ -330,7 +333,7 @@
                 <span class="fv" class:fv-mute={!employee.department?.name}>{employee.department?.name ?? '—'}</span>
               {/if}
             </div>
-            <div class="fc fc-last">
+            <div class="fc">
               <span class="fl">BRANCH</span>
               {#if editMode}
                 <select class="fc-select" bind:value={draft.branchId}>
@@ -341,6 +344,14 @@
                 </select>
               {:else}
                 <span class="fv" class:fv-mute={!employee.branch?.name}>{employee.branch?.name ?? '—'}</span>
+              {/if}
+            </div>
+            <div class="fc fc-last">
+              <span class="fl">ROLE / POSITION</span>
+              {#if editMode}
+                <input class="fc-input" bind:value={draft.position} placeholder="e.g. Accounting Staff" />
+              {:else}
+                <span class="fv" class:fv-mute={!employee.position}>{employee.position ?? '—'}</span>
               {/if}
             </div>
             <div class="fc fc-last">

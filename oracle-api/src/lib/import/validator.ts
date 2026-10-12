@@ -45,6 +45,49 @@ const OWNERSHIP_MAP: Record<string, string> = {
   personal: "personal", byod: "personal",
 };
 
+const EXCEL_EPOCH_UTC = Date.UTC(1899, 11, 30);
+
+function utcDate(year: number, monthIndex: number, day: number): Date | null {
+  const d = new Date(Date.UTC(year, monthIndex, day));
+  // Reject overflow such as 31/02, which Date would silently roll forward.
+  return d.getUTCFullYear() === year && d.getUTCMonth() === monthIndex && d.getUTCDate() === day ? d : null;
+}
+
+/**
+ * Read a spreadsheet date cell as a calendar date at UTC midnight, so the day
+ * stored does not depend on the server's time zone. Accepts ISO dates, the
+ * m/d/y text Excel exports, d/m/y when the first number cannot be a month,
+ * month-name forms, and raw Excel serial numbers. Returns null when the value
+ * is not a date.
+ */
+export function parseImportDate(value: unknown): Date | null {
+  if (value instanceof Date) return Number.isNaN(value.getTime()) ? null : utcDate(value.getFullYear(), value.getMonth(), value.getDate());
+  const text = String(value ?? "").trim();
+  if (!text) return null;
+
+  if (/^\d+(\.\d+)?$/.test(text)) {
+    const serial = Math.floor(Number(text));
+    // 1955–2119: outside this a bare number is far more likely a typo or an ID.
+    return serial >= 20000 && serial <= 80000 ? new Date(EXCEL_EPOCH_UTC + serial * 86_400_000) : null;
+  }
+
+  const iso = /^(\d{4})-(\d{1,2})-(\d{1,2})(?:$|[T\s])/.exec(text);
+  if (iso) return utcDate(Number(iso[1]), Number(iso[2]) - 1, Number(iso[3]));
+
+  const slashed = /^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/.exec(text);
+  if (slashed) {
+    const first = Number(slashed[1]);
+    const second = Number(slashed[2]);
+    const year = slashed[3].length === 2 ? 2000 + Number(slashed[3]) : Number(slashed[3]);
+    // m/d/y is what Excel writes; fall back to d/m/y only when m/d/y is impossible.
+    return first <= 12 ? utcDate(year, first - 1, second) : utcDate(year, second - 1, first);
+  }
+
+  const parsed = new Date(text);
+  if (Number.isNaN(parsed.getTime())) return null;
+  return utcDate(parsed.getFullYear(), parsed.getMonth(), parsed.getDate());
+}
+
 function getNestedValue(mapped: Record<string, unknown>, path: string): unknown {
   if (path.startsWith("meta.")) {
     const key = path.slice(5);
@@ -96,6 +139,12 @@ export function validateRows(
 
     if (Object.keys(metadata).length > 0) mapped.metadata = metadata;
 
+    // No name for this row: build one from Brand + Model, else the computer name.
+    if (mapped.name === undefined) {
+      const derived = [metadata.brand, metadata.model].filter(Boolean).join(" ").trim() || metadata.computerName;
+      if (derived) mapped.name = String(derived);
+    }
+
     const errors: ValidationIssue[] = [];
     const warnings: ValidationIssue[] = [];
 
@@ -116,11 +165,13 @@ export function validateRows(
     }
 
     // ── Date fields ──────────────────────────────────────────────────────────
-    for (const field of ["warrantyExpiry", "nextMaintenanceDate"]) {
+    // An unreadable date is dropped with a warning rather than failing the
+    // whole row — the asset is still worth importing without it.
+    for (const field of ["warrantyExpiry", "purchaseDate", "nextMaintenanceDate"]) {
       if (mapped[field]) {
-        const d = new Date(String(mapped[field]));
-        if (isNaN(d.getTime())) {
-          errors.push({ field, message: `Invalid date: "${mapped[field]}"`, severity: "error" });
+        const d = parseImportDate(mapped[field]);
+        if (!d) {
+          warnings.push({ field, message: `Could not read "${mapped[field]}" as a date for ${field} — left blank.`, severity: "warning" });
           delete mapped[field];
         } else {
           mapped[field] = d.toISOString();

@@ -38,7 +38,11 @@ const FIELD_ALIASES: Record<string, string[]> = {
   serialNumber:  ["Serial Number", "S/N", "Serial No", "Serial No.", "Serial", "S/N Number", "SN"],
   assetTag:      ["Asset Tag", "Asset Tag Number", "Tag No", "Tag #", "Asset ID", "Tag Number", "Asset Tag No"],
   propertyTag:   ["Property Tag", "Property Number", "PT No", "PT #", "Property Tag Number", "Property Tag No"],
-  warrantyExpiry:["Warranty Expiry", "Warranty End", "Warranty Date", "Expiry Date", "Warranty", "Warranty Until"],
+  warrantyExpiry:[
+    "Warranty Expiry", "Warranty End", "Warranty Date", "Expiry Date", "Warranty", "Warranty Until",
+    "Expiration Date", "Expired Date", "Expiry", "Warranty Expiration", "Warranty Expiry Date", "Warranty Expiration Date",
+  ],
+  purchaseDate:  ["Purchase Date", "Date Purchased", "Date of Purchase", "Purchased Date", "Purchased On", "Date Acquired", "Acquisition Date", "Date Bought"],
   condition:     ["Condition", "Status", "Asset Status", "Asset Condition", "Item Condition"],
   ownership:     ["Ownership", "Owner", "Ownership Type", "Company/Personal"],
   branchName:    ["Branch", "Location", "Site", "Office", "Branch Name", "Branch/Location", "Area", "Department Location", "Work Location"],
@@ -336,6 +340,9 @@ export function mapColumnsEnhanced(
   return { mappings, unmapped, columnConfidences, autoConfidence, requiresManualMapping, contentSignals };
 }
 
+/** Metadata columns a missing asset name can be built from, in order of preference. */
+export const NAME_SOURCE_KEYS = ["brand", "model", "computerName"];
+
 /**
  * Validate that required mappings are present before row-level validation.
  * Returns an array of user-facing error strings (empty = all good).
@@ -344,10 +351,13 @@ export function mapColumnsEnhanced(
 export function validateMappingCompleteness(mappings: FieldMapping[]): string[] {
   const errors: string[] = [];
   const hasName = mappings.some((m) => !m.isMetadata && m.systemField === "name");
-  if (!hasName) {
+  // A sheet without a name column can still be imported: validateRows builds
+  // the name from these columns, so their presence is enough to proceed.
+  const canDeriveName = mappings.some((m) => m.isMetadata && NAME_SOURCE_KEYS.includes(m.metadataKey ?? ""));
+  if (!hasName && !canDeriveName) {
     errors.push(
       "The 'name' column is not mapped — import cannot proceed. " +
-      "Map a column like 'Items', 'Asset Name', or 'Name' to the Name field."
+      "Add a column like 'Asset Name', 'Items', or 'Name' (or Brand and Model, which are combined into a name)."
     );
   }
   return errors;

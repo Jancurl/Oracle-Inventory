@@ -463,11 +463,20 @@
 
   const SYSTEM_FIELD_LABELS: Record<string, string> = {
     name: 'Asset Name', serialNumber: 'Serial Number', assetTag: 'Asset Tag',
-    propertyTag: 'Property Tag', warrantyExpiry: 'Warranty Expiry',
+    propertyTag: 'Property Tag', warrantyExpiry: 'Warranty Expiry', purchaseDate: 'Purchase Date',
     condition: 'Condition', ownership: 'Ownership', branchName: 'Branch',
     employeeRef: 'Assigned Employee', employeeId: 'Employee ID', description: 'Notes',
-    categoryHint: 'Category',
+    categoryHint: 'Category', employeeDeptName: 'Employee Department',
+    employeePhone: 'Employee Phone', employeePosition: 'Employee Position',
   };
+
+  // The detected category may not exist yet (it is created on import); keep it selectable.
+  const categoryOptions = $derived((() => {
+    const names = categories.map(c => c.name);
+    const known = names.some(n => n.toLowerCase() === selectedCategory.toLowerCase());
+    return selectedCategory && !known ? [...names, selectedCategory] : names;
+  })());
+  const isNewCategory = (name: string) => !categories.some(c => c.name.toLowerCase() === name.toLowerCase());
 
   const METHOD_LABELS: Record<string, string> = {
     alias: 'Exact', fuzzy: 'Fuzzy', content: 'Inferred',
@@ -665,6 +674,23 @@
       </div>
 
       <div class="mapping-fields">
+        <div class="field-row">
+          <label class="field-label" for="import-category">Category</label>
+          <select id="import-category" class="select-sm" bind:value={selectedCategory}>
+            {#each categoryOptions as name}
+              <option value={name}>{name}{isNewCategory(name) ? ' (new)' : ''}</option>
+            {/each}
+          </select>
+          <span class="toggle-hint">For rows without their own Category value</span>
+        </div>
+        <div class="field-row">
+          <label class="field-label" for="import-branch">Default branch</label>
+          <select id="import-branch" class="select-sm" bind:value={selectedBranchId}>
+            <option value="">— None —</option>
+            {#each branches as b}<option value={b.id}>{b.name}</option>{/each}
+          </select>
+          <span class="toggle-hint">For rows without their own Branch value</span>
+        </div>
         {#if can('force_import')}
           <div class="field-row toggle-row">
             <label class="field-label">Transactional import</label>

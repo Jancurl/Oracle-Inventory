@@ -12,17 +12,28 @@
   import TableStates from '$lib/components/TableStates.svelte';
 
   type Branch = { id: string; name: string };
-  type Department = { id: string; name: string; archivedAt: string | null; createdAt: string; branch: Branch; _count: { employees: number } };
+  type Department = { id: string; name: string; archivedAt: string | null; createdAt: string; branch: Branch; _count: { employees: number }; employeesByBranch?: Record<string, number> };
   let departments = $state<Department[]>([]);
   let branches = $state<Branch[]>([]);
   let loading = $state(true); let error = $state(''); let search = $state(''); let currentPage = $state(1); let perPage = $state(10);
   let showCreate = $state(false); let busy = $state(false); let formError = $state('');
   let name = $state(''); let branchId = $state('');
-  const filtered = $derived(departments.filter((d) => d.name.toLowerCase().includes(search.toLowerCase())));
+  let filterBranch = $state('all');
+  // Employees are counted by their own branch: a department can still hold
+  // people from another branch, and those must not be lumped in.
+  function countIn(d: Department, branch: string) {
+    if (branch === 'all') return d._count.employees;
+    if (d.employeesByBranch) return d.employeesByBranch[branch] ?? 0;
+    return d.branch.id === branch ? d._count.employees : 0;
+  }
+  const inBranch = $derived(filterBranch === 'all' ? departments : departments.filter((d) => d.branch.id === filterBranch || countIn(d, filterBranch) > 0));
+  const filtered = $derived(inBranch.filter((d) => d.name.toLowerCase().includes(search.toLowerCase())));
   const totalPages = $derived(Math.max(1, Math.ceil(filtered.length / perPage)));
   const paginated = $derived(filtered.slice((currentPage - 1) * perPage, currentPage * perPage));
-  const activeCount = $derived(departments.filter((d) => !d.archivedAt).length);
-  const employeeCount = $derived(departments.reduce((sum, d) => sum + d._count.employees, 0));
+  const activeCount = $derived(inBranch.filter((d) => !d.archivedAt).length);
+  const employeeCount = $derived(inBranch.reduce((sum, d) => sum + countIn(d, filterBranch), 0));
+  const branchLabel = $derived(branches.find((b) => b.id === filterBranch)?.name ?? '');
+  function branchEmployees(id: string) { return departments.reduce((sum, d) => sum + countIn(d, id), 0); }
 
   async function load() {
     loading = true; error = '';
@@ -38,7 +49,7 @@
   onMount(load);
   onDestroy(onChange(['Department', 'Branch'], () => load()));
   function resetPage() { currentPage = 1; }
-  function startCreate() { name = ''; branchId = branches[0]?.id ?? ''; formError = ''; showCreate = true; }
+  function startCreate() { name = ''; branchId = filterBranch !== 'all' ? filterBranch : branches[0]?.id ?? ''; formError = ''; showCreate = true; }
   async function create() {
     if (!name.trim()) { formError = 'Department name is required.'; return; }
     if (!branchId) { formError = 'Branch is required.'; return; }
@@ -57,26 +68,32 @@
   </div>
 
   <div class="stats-row">
-    <StatCard value={loading ? '—' : departments.length} label="Total Departments" helper="Active and archived" />
+    <StatCard value={loading ? '—' : inBranch.length} label="Total Departments" helper="Active and archived" />
     <StatCard value={loading ? '—' : activeCount} label="Active" helper="Available for assignment" />
-    <StatCard value={loading ? '—' : employeeCount} label="Employees Assigned" helper="Across all departments" />
+    <StatCard value={loading ? '—' : employeeCount} label="Employees Assigned" helper={branchLabel ? `In ${branchLabel}` : 'Across all branches'} />
   </div>
 
   <div class="main-grid">
     <div class="card table-card">
-      <div class="toolbar"><SearchInput bind:value={search} placeholder="Search departments…" oninput={resetPage} /></div>
-      <TableStates loading={loading} error={error} empty={!loading && !error && filtered.length === 0} loadingText="Loading departments…" emptyTitle={search ? 'No departments match your search' : 'No departments yet'} emptyMessage={search ? 'Try a different search term.' : 'Create your first department to organize employee records.'} onRetry={load} />
+      <div class="toolbar">
+        <SearchInput bind:value={search} placeholder="Search departments…" oninput={resetPage} />
+        <select class="filter-select" aria-label="Filter by branch" bind:value={filterBranch} onchange={resetPage}>
+          <option value="all">All Branches ({departments.reduce((sum, d) => sum + d._count.employees, 0)} employees)</option>
+          {#each branches as b}<option value={b.id}>{b.name} ({branchEmployees(b.id)} employees)</option>{/each}
+        </select>
+      </div>
+      <TableStates loading={loading} error={error} empty={!loading && !error && filtered.length === 0} loadingText="Loading departments…" emptyTitle={search || filterBranch !== 'all' ? 'No departments match your filters' : 'No departments yet'} emptyMessage={search || filterBranch !== 'all' ? 'Try a different search term or branch.' : 'Create your first department to organize employee records.'} onRetry={load} />
       {#if !loading && !error && filtered.length}
       <div class="table-wrap">
         <table>
           <thead><tr><th>Name</th><th>Branch</th><th>Status</th><th>Employees</th><th>Actions</th></tr></thead>
           <tbody>
             {#each paginated as d}
-            <tr class="row">
+            <tr class="row row-link" onclick={() => goto('/departments/' + d.id)}>
               <td><button class="name-btn" onclick={() => goto('/departments/' + d.id)}>{d.name}</button></td>
               <td>{d.branch.name}</td>
               <td>{d.archivedAt ? 'Archived' : 'Active'}</td>
-              <td class="td-num">{d._count.employees}</td>
+              <td class="td-num">{countIn(d, filterBranch)}</td>
               <td onclick={(e) => e.stopPropagation()}>
                 <button class="icon-btn" title="View" onclick={() => goto('/departments/' + d.id)}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
@@ -113,7 +130,8 @@
   .main-grid { display: grid; grid-template-columns: 1fr; gap: 16px; align-items: stretch; flex: 1; min-height: 0; }
   .card { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--r-lg); }
   .table-card { overflow: hidden; display: flex; flex-direction: column; flex: 1; min-height: 0; }
-  .toolbar { padding: 14px 16px; border-bottom: 1px solid var(--hairline); }
+  .toolbar { padding: 14px 16px; border-bottom: 1px solid var(--hairline); display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  .filter-select { height: 34px; padding: 0 10px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--canvas); color: var(--ink); font-family: var(--font-sans); font-size: 13px; }
   .table-wrap { overflow-x: auto; overflow-y: auto; flex: 1; min-height: 0; }
   table { width: 100%; border-collapse: collapse; }
   th, td { text-align: left; padding: 12px 16px; border-bottom: 1px solid var(--hairline); font-size: 13px; }
@@ -121,6 +139,7 @@
   tbody tr:last-child td { border-bottom: none; }
   .row { transition: background 100ms ease; }
   .row:hover td { background: var(--canvas-soft); }
+  .row-link { cursor: pointer; }
   .td-num { font-weight: 500; }
   .name-btn { border: 0; background: transparent; font-weight: 600; cursor: pointer; color: var(--ink); padding: 0; font-family: var(--font-sans); font-size: 13px; }
   .name-btn:hover { color: var(--link); text-decoration: underline; }

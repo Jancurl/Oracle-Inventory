@@ -1,6 +1,7 @@
 import "dotenv/config";
 import express from "express";
 import { Router } from "express";
+import type { Request, Response, NextFunction } from "express";
 import { prisma } from "./lib/prisma";
 import authRoutes from "./routes/auth";
 import assetsRoutes from "./routes/assets";
@@ -118,11 +119,63 @@ apiRouter.use("/network", networkDeviceRoutes);
 apiRouter.use("/phones", phoneRoutes);
 apiRouter.use("/", infrastructureRoutes);
 
+// Express 4 does not catch rejected promises from async handlers, so a thrown
+// Prisma error left the request hanging until the platform timed it out.
+// Wrap every handler under the API router so rejections reach the error
+// handler below and the client gets a real response.
+type RouteHandler = (req: Request, res: Response, next: NextFunction) => unknown;
+type RouterLayer = { handle: RouteHandler & { stack?: RouterLayer[] }; route?: { stack: RouterLayer[] } };
+const wrappedLayers = new WeakSet<RouterLayer>();
+
+function forwardAsyncErrors(stack: RouterLayer[]) {
+  for (const layer of stack) {
+    if (wrappedLayers.has(layer)) continue;
+    wrappedLayers.add(layer);
+    if (layer.route) { forwardAsyncErrors(layer.route.stack); continue; }
+    if (layer.handle.stack) { forwardAsyncErrors(layer.handle.stack); continue; }
+    const original = layer.handle;
+    if (original.length > 3) continue;
+    layer.handle = function (this: unknown, req, res, next) {
+      try {
+        const result = original.call(this, req, res, next);
+        if (result && typeof (result as Promise<unknown>).catch === "function") (result as Promise<unknown>).catch(next);
+      } catch (error) { next(error); }
+    };
+  }
+}
+forwardAsyncErrors((apiRouter as unknown as { stack: RouterLayer[] }).stack);
+
 app.use("/api", apiRouter);
 
 // Vercel's file-system router intercepts nested paths beginning with `/api/`
 // before the Express catch-all receives them. The frontend keeps its public
 // `/api/*` contract and proxies it to this internal, Vercel-safe gateway.
 app.use("/gateway", apiRouter);
+
+const databaseUnavailableCodes = new Set(["P1000", "P1001", "P1002", "P1003", "P1008", "P1010", "P1017", "P2010", "P2024"]);
+
+app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
+  if (res.headersSent) { next(error); return; }
+  const known = error as { name?: unknown; code?: unknown; message?: unknown; status?: unknown };
+  const code = typeof known.code === "string" ? known.code : "";
+  const rawMessage = typeof known.message === "string" ? known.message : "No error message";
+  console.error("Unhandled API error", {
+    name: known.name,
+    code,
+    message: rawMessage.replace(/postgres(?:ql)?:\/\/\S+/gi, "[REDACTED_DATABASE_URL]"),
+  });
+
+  if (databaseUnavailableCodes.has(code) || known.name === "PrismaClientInitializationError") {
+    res.status(503).json({ error: "The database is not reachable right now. Please try again in a few minutes." });
+    return;
+  }
+  if (code === "P2002") { res.status(409).json({ error: "A record with the same unique value already exists." }); return; }
+  if (code === "P2003") { res.status(409).json({ error: "This record is linked to other records and cannot be changed that way." }); return; }
+  if (code === "P2025") { res.status(404).json({ error: "Record not found." }); return; }
+  if (known.name === "PrismaClientValidationError") { res.status(400).json({ error: "Some of the submitted values are not valid. Check the form and try again." }); return; }
+  if (known.name === "MulterError") { res.status(400).json({ error: rawMessage }); return; }
+  if (typeof known.status === "number" && known.status >= 400 && known.status < 500) { res.status(known.status).json({ error: "The request could not be read." }); return; }
+  res.status(500).json({ error: "Something went wrong on the server. Please try again." });
+});
 
 export default app;

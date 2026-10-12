@@ -38,15 +38,25 @@
   // ── Fixed position (escapes overflow:hidden parents) ─────────────────────────
   let popoverTop  = $state(0);
   let popoverLeft = $state(0);
+  let popoverEl: HTMLDivElement | undefined = $state();
+
+  // Below the field by default; above it when the calendar would otherwise run
+  // off the bottom of the window (a field near the page bottom was unusable).
+  function placePopover() {
+    if (!triggerEl) return;
+    const rect    = triggerEl.getBoundingClientRect();
+    const popW    = 296;
+    const popH    = popoverEl?.offsetHeight || 360;
+    const maxLeft = window.innerWidth - popW - 8;
+    const below   = rect.bottom + 6;
+    const above   = rect.top - popH - 6;
+    popoverTop  = below + popH <= window.innerHeight - 8 || above < 8 ? below : above;
+    popoverLeft = Math.min(Math.max(8, rect.left), maxLeft);
+  }
 
   $effect(() => {
-    if (open && triggerEl) {
-      const rect   = triggerEl.getBoundingClientRect();
-      const popW   = 296;
-      const maxLeft = window.innerWidth - popW - 8;
-      popoverTop  = rect.bottom + 6;
-      popoverLeft = Math.min(Math.max(8, rect.left), maxLeft);
-    }
+    // popoverEl is read so the position is corrected once the calendar has rendered.
+    if (open && triggerEl) { void popoverEl; placePopover(); }
   });
 
   // Sync view to value when it changes externally
@@ -150,13 +160,7 @@
   }
 
   function handleWindowScroll() {
-    if (open && triggerEl) {
-      const rect    = triggerEl.getBoundingClientRect();
-      const popW    = 296;
-      const maxLeft = window.innerWidth - popW - 8;
-      popoverTop  = rect.bottom + 6;
-      popoverLeft = Math.min(Math.max(8, rect.left), maxLeft);
-    }
+    if (open) placePopover();
   }
 
   // ── Display ──────────────────────────────────────────────────────────────────
@@ -211,6 +215,7 @@
   {#if open}
     <div
       class="dp-popover"
+      bind:this={popoverEl}
       style="top:{popoverTop}px;left:{popoverLeft}px"
       role="dialog"
       aria-label="Choose a date"

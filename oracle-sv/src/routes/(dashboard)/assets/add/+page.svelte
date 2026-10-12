@@ -46,6 +46,17 @@
   let submitting = $state(false);
   let submitErr  = $state('');
 
+  // Saving is several requests: the asset first, then its specs, peripherals,
+  // photos and attachment. If a later one fails the asset already exists, so
+  // the next Save has to carry on from there instead of creating it again.
+  let savedAssetId = $state('');
+  const completedSteps = new Set<string>();
+  async function once(step: string, run: () => Promise<unknown>) {
+    if (completedSteps.has(step)) return;
+    await run();
+    completedSteps.add(step);
+  }
+
   // ── Computer / Laptop specs: shown inline whenever the selected category
   //    is a computer/laptop category, instead of a separate mode or tab ──────────
   const isComputerCategory = $derived(
@@ -225,11 +236,20 @@
     const input = e.currentTarget as HTMLInputElement;
     attachmentFile = input.files?.[0] ?? null;
   }
-  async function uploadAttachment(assetId: string) {
-    if (!attachmentFile) return;
+  async function uploadFile(assetId: string, upload: File) {
     const form = new FormData();
-    form.append('file', attachmentFile);
-    await api.raw(`/api/assets/${assetId}/attachments`, { method: 'POST', body: form });
+    form.append('file', upload);
+    const res = await api.raw(`/api/assets/${assetId}/attachments`, { method: 'POST', body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      throw new Error(`${upload.name}: ${(body as { error?: string }).error ?? `upload failed (HTTP ${res.status})`}`);
+    }
+  }
+  // Photos are kept with the other attachments of the asset.
+  async function uploadFiles(assetId: string) {
+    for (const photo of photos) await once(`photo:${photo.id}`, () => uploadFile(assetId, photo.file));
+    const file = attachmentFile;
+    if (file) await once(`attachment:${file.name}:${file.size}`, () => uploadFile(assetId, file));
   }
 
   // ── Computer / Laptop specs: same form, same submit. Only relevant when the
@@ -281,6 +301,14 @@
   function ciAddComponent(type: 'ram' | 'storage') { ciComponents = [...ciComponents, { type }]; }
   function ciRemoveComponent(index: number) { ciComponents = ciComponents.filter((_, i) => i !== index); }
 
+  // "8GB" → "8", "1TB" → "1000"; the intake API takes capacity as a plain number.
+  function capacityInGb(value: string | undefined): string | undefined {
+    if (!value?.trim()) return undefined;
+    const match = /^\s*(\d+(?:\.\d+)?)\s*(gb|g|tb|t)?\s*$/i.exec(value);
+    if (!match) return value;
+    return /^t/i.test(match[2] ?? '') ? String(Number(match[1]) * 1000) : match[1];
+  }
+
   function ciDraftBody() {
     const deviceType = /laptop/i.test(categories.find(c => c.id === categoryId)?.name ?? '') ? 'laptop' : 'computer';
     return {
@@ -304,40 +332,54 @@
       operatingSystem: ciOperatingSystem.trim(),
       osVersion: ciOsVersion.trim(),
       osInstallDate: ciOsInstallDate,
-      components: ciComponents,
+      components: ciComponents.map(c => ({ ...c, capacity: capacityInGb(c.capacity) })),
     };
   }
 
   async function submitComputerAsset() {
     ciError = ''; tagUnavailableError = '';
 
-    const body = ciDraftId ? { ...ciDraftBody(), expectedUpdatedAt: ciDraftVersion } : ciDraftBody();
-    const row = ciDraftId
-      ? await api.put<{ id: string; updatedAt: string }>(`/api/computer-intake/drafts/${ciDraftId}`, body)
-      : await api.post<{ id: string; updatedAt: string }>('/api/computer-intake/drafts', body);
-    ciDraftId = row.id; ciDraftVersion = row.updatedAt;
+    if (!savedAssetId) {
+      if (ownership !== 'company') {
+        submitErr = 'Computer and laptop specs can only be saved for company-owned devices. Set Ownership to Company.';
+        return;
+      }
 
-    if (!pendingDuplicateConfirm) {
-      const check = await api.get<{ duplicateComputerName: boolean; assetTagAvailable: boolean; updatedAt: string }>(`/api/computer-intake/drafts/${ciDraftId}/preflight`);
-      ciDraftVersion = check.updatedAt;
-      if (!check.assetTagAvailable) {
-        tagUnavailableError = 'This asset tag is already in use. Change it before saving.';
-        return;
+      const body = ciDraftId ? { ...ciDraftBody(), expectedUpdatedAt: ciDraftVersion } : ciDraftBody();
+      const row = ciDraftId
+        ? await api.put<{ id: string; updatedAt: string }>(`/api/computer-intake/drafts/${ciDraftId}`, body)
+        : await api.post<{ id: string; updatedAt: string }>('/api/computer-intake/drafts', body);
+      ciDraftId = row.id; ciDraftVersion = row.updatedAt;
+
+      if (!pendingDuplicateConfirm) {
+        const check = await api.get<{ duplicateComputerName: boolean; assetTagAvailable: boolean; updatedAt: string }>(`/api/computer-intake/drafts/${ciDraftId}/preflight`);
+        ciDraftVersion = check.updatedAt;
+        if (!check.assetTagAvailable) {
+          tagUnavailableError = 'This asset tag is already in use. Change it before saving.';
+          return;
+        }
+        if (check.duplicateComputerName) {
+          duplicateComputerNameWarning = true;
+          pendingDuplicateConfirm = true;
+          return;
+        }
       }
-      if (check.duplicateComputerName) {
-        duplicateComputerNameWarning = true;
-        pendingDuplicateConfirm = true;
-        return;
-      }
+
+      const created = await api.post<{ id: string }>(`/api/computer-intake/drafts/${ciDraftId}/submit`, { expectedUpdatedAt: ciDraftVersion }, { 'Idempotency-Key': `computer-intake-${ciDraftId}-${ciDraftVersion}` });
+      savedAssetId = created.id;
     }
 
-    const created = await api.post<{ id: string }>(`/api/computer-intake/drafts/${ciDraftId}/submit`, { expectedUpdatedAt: ciDraftVersion }, { 'Idempotency-Key': `computer-intake-${ciDraftId}-${ciDraftVersion}` });
-    await uploadAttachment(created.id);
+    const assetId = savedAssetId;
+    // The intake API has no vendor, internal notes or maintenance date; they are saved on the asset itself.
+    if (vendor.trim() || internalNotes.trim() || (enableMaintenance && nextMaintenance)) {
+      await once('details', () => api.put(`/api/assets/${assetId}`, plainAssetBody()));
+    }
+    await uploadFiles(assetId);
     goto('/assets');
   }
 
-  async function submitPlainAsset() {
-    return api.post<{ id: string }>('/api/assets', {
+  function plainAssetBody() {
+    return {
       name:               assetName.trim(),
       serialNumber:       serialNumber.trim() || null,
       categoryId:         categoryId || null,
@@ -346,12 +388,26 @@
       ownership,
       description:        description.trim() || null,
       warrantyExpiry:     warrantyExpiry || null,
+      purchaseDate:       purchaseDate || null,
       nextMaintenanceDate: enableMaintenance && nextMaintenance ? nextMaintenance : null,
       imeiNumber:         isPhoneCategory && phoneImei.trim() ? phoneImei.trim() : null,
       propertyTag:        isPhoneCategory && phonePropertyTag.trim()
                              ? phonePropertyTag.trim()
                              : isPeripheralCategory && periphPropertyTag.trim() ? periphPropertyTag.trim() : null,
-    });
+      vendor:             vendor.trim() || null,
+      internalNotes:      internalNotes.trim() || null,
+    };
+  }
+
+  async function submitPlainAsset() {
+    if (savedAssetId) {
+      // Retrying after a later step failed: keep the same asset and apply any edits made since.
+      await api.put(`/api/assets/${savedAssetId}`, plainAssetBody()).catch(() => {});
+      return { id: savedAssetId };
+    }
+    const asset = await api.post<{ id: string }>('/api/assets', plainAssetBody());
+    savedAssetId = asset.id;
+    return asset;
   }
 
   async function attachPeripheralSpecs(assetId: string) {
@@ -380,15 +436,38 @@
     const asset = await submitPlainAsset();
     if (phoneBrand.trim() || phoneModel.trim() || phoneNotes.trim()) {
       const idempotencyKey = `phone-${asset.id}-${Date.now()}`;
-      await api.post('/api/phones', {
-        assetId: asset.id,
-        brand: phoneBrand.trim() || undefined,
-        model: phoneModel.trim() || undefined,
-        notes: phoneNotes.trim() || undefined,
-      }, { 'Idempotency-Key': idempotencyKey });
+      await once('phone', async () => {
+        try {
+          await api.post('/api/phones', {
+            assetId: asset.id,
+            brand: phoneBrand.trim() || undefined,
+            model: phoneModel.trim() || undefined,
+            notes: phoneNotes.trim() || undefined,
+          }, { 'Idempotency-Key': idempotencyKey });
+        } catch (e) {
+          // Phone module switched off for this branch, or this role may not
+          // manage phone profiles: the save must still succeed, so brand/model
+          // go to the generic device details and the notes join the asset's
+          // internal notes instead of being lost.
+          const failure = e as { code?: string; status?: number };
+          if (failure.code !== 'PHONES_DISABLED' && failure.status !== 403) throw e;
+          if (phoneBrand.trim() || phoneModel.trim()) {
+            await api.put(`/api/assets/${asset.id}/device-profile`, {
+              brand: phoneBrand.trim() || undefined,
+              model: phoneModel.trim() || undefined,
+            });
+          }
+          if (phoneNotes.trim()) {
+            await api.put(`/api/assets/${asset.id}`, {
+              ...plainAssetBody(),
+              internalNotes: [internalNotes.trim(), phoneNotes.trim()].filter(Boolean).join('\n'),
+            });
+          }
+        }
+      });
     }
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -396,13 +475,13 @@
     if (!apPhysicalLocation.trim()) { submitErr = 'Physical location is required for an access point.'; return; }
     const asset = await submitPlainAsset();
     const idempotencyKey = `access-point-${asset.id}-${Date.now()}`;
-    await api.post('/api/network/access-points', {
+    await once('access-point', () => api.post('/api/network/access-points', {
       assetId: asset.id,
       physicalLocation: apPhysicalLocation.trim(),
       notes: apNotes.trim() || undefined,
-    }, { 'Idempotency-Key': idempotencyKey });
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    }, { 'Idempotency-Key': idempotencyKey }));
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -410,15 +489,15 @@
     if (!swPhysicalLocation.trim()) { submitErr = 'Physical location is required for a switch.'; return; }
     const asset = await submitPlainAsset();
     const idempotencyKey = `switch-${asset.id}-${Date.now()}`;
-    await api.post('/api/network/switches', {
+    await once('switch', () => api.post('/api/network/switches', {
       assetId: asset.id,
       switchType: swSwitchType,
       physicalLocation: swPhysicalLocation.trim(),
-      portCount: swPortCount.trim() ? Number(swPortCount) : undefined,
+      portCount: String(swPortCount ?? '').trim() ? Number(swPortCount) : undefined,
       notes: swNotes.trim() || undefined,
-    }, { 'Idempotency-Key': idempotencyKey });
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    }, { 'Idempotency-Key': idempotencyKey }));
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -426,7 +505,7 @@
     if (!camPhysicalLocation.trim()) { submitErr = 'Physical location is required for a camera.'; return; }
     const asset = await submitPlainAsset();
     const idempotencyKey = `camera-${asset.id}-${Date.now()}`;
-    await api.post('/api/cctv/cameras', {
+    await once('camera', () => api.post('/api/cctv/cameras', {
       assetId: asset.id,
       physicalLocation: camPhysicalLocation.trim(),
       coverageArea: camCoverageArea.trim() || undefined,
@@ -436,9 +515,9 @@
       motionDetection: camMotionDetection,
       installationDate: camInstallationDate || undefined,
       notes: camNotes.trim() || undefined,
-    }, { 'Idempotency-Key': idempotencyKey });
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    }, { 'Idempotency-Key': idempotencyKey }));
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -448,17 +527,17 @@
     if (!Number.isInteger(capacity) || capacity < 1) { submitErr = 'Channel capacity must be a whole number of at least 1.'; return; }
     const asset = await submitPlainAsset();
     const idempotencyKey = `recorder-${asset.id}-${Date.now()}`;
-    await api.post('/api/cctv/recorders', {
+    await once('recorder', () => api.post('/api/cctv/recorders', {
       assetId: asset.id,
       recorderType: recRecorderType,
       channelCapacity: capacity,
       physicalLocation: recPhysicalLocation.trim(),
-      storageCapacityBytes: recStorageCapacityGb.trim() ? Number(recStorageCapacityGb) * 1_000_000_000 : undefined,
-      retentionDaysTarget: recRetentionDaysTarget.trim() ? Number(recRetentionDaysTarget) : undefined,
+      storageCapacityBytes: String(recStorageCapacityGb ?? '').trim() ? Number(recStorageCapacityGb) * 1_000_000_000 : undefined,
+      retentionDaysTarget: String(recRetentionDaysTarget ?? '').trim() ? Number(recRetentionDaysTarget) : undefined,
       notes: recNotes.trim() || undefined,
-    }, { 'Idempotency-Key': idempotencyKey });
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    }, { 'Idempotency-Key': idempotencyKey }));
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -487,8 +566,8 @@
       await api.post(`/api/servers/${asset.id}/roles`, { roleType: srvRoleType }, { 'Idempotency-Key': roleKey });
     }
 
-    await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+    await once('peripherals', () => attachPeripherals(asset.id));
+    await uploadFiles(asset.id);
     goto('/assets');
   }
 
@@ -516,16 +595,19 @@
       } else {
         const asset = await submitPlainAsset();
         if (isPeripheralCategory) {
-          await attachPeripheralSpecs(asset.id);
-          await uploadAttachment(asset.id);
+          await once('specs', () => attachPeripheralSpecs(asset.id));
         } else {
-          await attachPeripherals(asset.id);
-    await uploadAttachment(asset.id);
+          await once('peripherals', () => attachPeripherals(asset.id));
         }
+        await uploadFiles(asset.id);
         goto('/assets');
       }
     } catch (e) {
-      submitErr = (e as Error).message;
+      const message = (e as Error).message;
+      const reason = /[.!?]$/.test(message) ? message : `${message}.`;
+      submitErr = savedAssetId
+        ? `The asset itself was saved, but a later step failed: ${reason} Saving again continues with the same asset — it will not create a second one.`
+        : message;
     } finally {
       submitting = false;
     }
@@ -564,7 +646,10 @@
   </header>
 
   {#if submitErr}
-    <div class="form-error">{submitErr}</div>
+    <div class="form-error">
+      {submitErr}
+      {#if savedAssetId}<a href="/assets/{savedAssetId}">Open the saved asset</a>{/if}
+    </div>
   {/if}
 
   <form id="add-asset-form" onsubmit={handleSubmit} class="form-body" novalidate>
@@ -610,7 +695,7 @@
                           <path d="M18.5 2.5a2.121 2.121 0 013 3L12 15l-4 1 1-4 9.5-9.5z"/>
                         </svg>
                       </label>
-                      <input id="replace-{photo.id}" type="file" accept="image/*" class="sr-only" onchange={(e) => replacePhoto(photo.id, e)} />
+                      <input id="replace-{photo.id}" type="file" accept="image/jpeg,image/png,image/webp" class="sr-only" onchange={(e) => replacePhoto(photo.id, e)} />
                       <button
                         type="button"
                         class="thumb-action thumb-action-remove"
@@ -635,7 +720,7 @@
               </svg>
               Upload Photos
             </label>
-            <input id="asset-images" type="file" accept="image/*" multiple class="sr-only" onchange={handleAddPhotos} />
+            <input id="asset-images" type="file" accept="image/jpeg,image/png,image/webp" multiple class="sr-only" onchange={handleAddPhotos} />
             <p class="upload-hint">Max 5MB each<br />JPG, PNG, or WebP</p>
           </div>
 
@@ -833,7 +918,7 @@
                       <input class="field-input" aria-label="Brand" bind:value={component.brand} placeholder="Brand" />
                       <input class="field-input" aria-label="Model" bind:value={component.model} placeholder="Model" />
                       <input class="field-input" aria-label="Serial number" bind:value={component.serialNumber} placeholder="Serial" />
-                      <input class="field-input" aria-label="Capacity" bind:value={component.capacity} placeholder="Capacity" />
+                      <input class="field-input" aria-label="Capacity in GB" bind:value={component.capacity} placeholder="Capacity (GB)" />
                       <button type="button" class="component-remove" onclick={() => ciRemoveComponent(index)} aria-label="Remove row">
                         <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M18 6L6 18M6 6L18 18"/></svg>
                       </button>

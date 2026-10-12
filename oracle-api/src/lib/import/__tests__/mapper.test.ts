@@ -163,3 +163,20 @@ describe("validateMappingCompleteness", () => {
     expect(errors[0]).toMatch(/name/i);
   });
 });
+
+describe("validateMappingCompleteness – derived name", () => {
+  it("accepts a sheet with Brand and Model but no name column", () => {
+    const { mappings } = mapColumns(["Asset Tag Number", "Brand", "Model", "Serial Number"]);
+    expect(validateMappingCompleteness(mappings)).toHaveLength(0);
+  });
+});
+
+describe("mapColumns – date columns", () => {
+  it.each(["Purchase Date", "Date Purchased", "Date Acquired"])("maps %s to purchaseDate", (header) => {
+    expect(mapColumns([header]).mappings[0]).toMatchObject({ systemField: "purchaseDate", isMetadata: false });
+  });
+
+  it.each(["Warranty Expiry", "Expiration Date", "Expired Date", "Expiry Date"])("maps %s to warrantyExpiry", (header) => {
+    expect(mapColumns([header]).mappings[0]).toMatchObject({ systemField: "warrantyExpiry", isMetadata: false });
+  });
+});

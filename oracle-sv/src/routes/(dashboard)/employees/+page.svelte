@@ -19,6 +19,7 @@
     email:       string | null;
     phone:       string | null;
     employeeId:  string | null;
+    position:    string | null;
     isActive:    boolean;
     source:      EmpSource;
     createdAt:   string;
@@ -28,7 +29,7 @@
   }
 
   interface Branch     { id: string; name: string; }
-  interface Department { id: string; name: string; }
+  interface Department { id: string; name: string; branch: { id: string; name: string } | null; }
 
   // ── State ──────────────────────────────────────────────────────────────────
   let employees   = $state<Employee[]>([]);
@@ -88,7 +89,18 @@
   let showAdd = $state(false);
   let adding  = $state(false);
   let addErr  = $state('');
-  let addForm = $state({ name: '', employeeId: '', branchId: '', departmentId: '', email: '', phone: '' });
+  let addForm = $state({ name: '', employeeId: '', position: '', branchId: '', departmentId: '', email: '', phone: '' });
+
+  // Departments belong to a branch, so once a branch is picked only its own are offered.
+  const addDepartments = $derived(
+    addForm.branchId ? departments.filter(d => d.branch?.id === addForm.branchId) : departments
+  );
+  const filterDepartments = $derived(
+    filterBranch === 'all' ? departments : departments.filter(d => d.branch?.id === filterBranch)
+  );
+  function deptLabel(d: Department, branchChosen: boolean) {
+    return branchChosen || !d.branch ? d.name : `${d.name} — ${d.branch.name}`;
+  }
 
   // ── Derived ───────────────────────────────────────────────────────────────
   const filtered = $derived(
@@ -97,7 +109,8 @@
       const matchSearch = !q
         || e.name.toLowerCase().includes(q)
         || (e.email ?? '').toLowerCase().includes(q)
-        || (e.employeeId ?? '').toLowerCase().includes(q);
+        || (e.employeeId ?? '').toLowerCase().includes(q)
+        || (e.position ?? '').toLowerCase().includes(q);
       const matchBranch = filterBranch === 'all' || e.branch?.id === filterBranch;
       const matchDept   = filterDept   === 'all' || e.department?.id === filterDept;
       const matchSource = filterSource === 'all'
@@ -137,7 +150,7 @@
 
   // ── Add Employee ─────────────────────────────────────────────────────────────
   function openAdd() {
-    addForm = { name: '', employeeId: '', branchId: '', departmentId: '', email: '', phone: '' };
+    addForm = { name: '', employeeId: '', position: '', branchId: '', departmentId: '', email: '', phone: '' };
     addErr = '';
     showAdd = true;
   }
@@ -149,6 +162,7 @@
       const created = await api.post<Employee>('/api/employees', {
         name:         addForm.name.trim(),
         employeeId:   addForm.employeeId.trim(),
+        position:     addForm.position.trim() || null,
         branchId:     addForm.branchId     || null,
         departmentId: addForm.departmentId || null,
         email:        addForm.email.trim() || null,
@@ -186,8 +200,12 @@
       <input class="field-input" type="text" placeholder="Auto-generated if left blank" bind:value={addForm.employeeId} />
     </div>
     <div class="field">
+      <label class="field-label">Role / Position</label>
+      <input class="field-input" type="text" placeholder="e.g. Accounting Staff" bind:value={addForm.position} />
+    </div>
+    <div class="field">
       <label class="field-label">Branch</label>
-      <select class="field-input" bind:value={addForm.branchId}>
+      <select class="field-input" bind:value={addForm.branchId} onchange={() => (addForm.departmentId = '')}>
         <option value="">— Select branch —</option>
         {#each branches as b}<option value={b.id}>{b.name}</option>{/each}
       </select>
@@ -196,7 +214,7 @@
       <label class="field-label">Department</label>
       <select class="field-input" bind:value={addForm.departmentId}>
         <option value="">— Select department —</option>
-        {#each departments as d}<option value={d.id}>{d.name}</option>{/each}
+        {#each addDepartments as d}<option value={d.id}>{deptLabel(d, !!addForm.branchId)}</option>{/each}
       </select>
     </div>
     <div class="field">
@@ -285,7 +303,7 @@
 
     <!-- Toolbar / filters -->
     <div class="toolbar">
-      <SearchInput bind:value={search} placeholder="Search name, email, or employee ID…" oninput={resetPage} />
+      <SearchInput bind:value={search} placeholder="Search name, email, role, or employee ID…" oninput={resetPage} />
       {#if can('manage_stock')}
         <button class="tool-edit-btn" class:tool-edit-btn--active={selectMode} onclick={toggleSelectMode}>
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="5" width="4" height="4" rx="0.5"/><line x1="9" y1="7" x2="21" y2="7"/><rect x="3" y="11" width="4" height="4" rx="0.5"/><line x1="9" y1="13" x2="21" y2="13"/><rect x="3" y="17" width="4" height="4" rx="0.5"/><line x1="9" y1="19" x2="21" y2="19"/></svg>
@@ -298,13 +316,13 @@
         <option value="zoho">Zoho Directory</option>
         <option value="manual">Manual</option>
       </select>
-      <select class="filter-select" bind:value={filterBranch} onchange={resetPage}>
+      <select class="filter-select" bind:value={filterBranch} onchange={() => { filterDept = 'all'; resetPage(); }}>
         <option value="all">All Branches</option>
         {#each branches as b}<option value={b.id}>{b.name}</option>{/each}
       </select>
       <select class="filter-select" bind:value={filterDept} onchange={resetPage}>
         <option value="all">All Departments</option>
-        {#each departments as d}<option value={d.id}>{d.name}</option>{/each}
+        {#each filterDepartments as d}<option value={d.id}>{deptLabel(d, filterBranch !== 'all')}</option>{/each}
       </select>
     </div>
 
@@ -341,6 +359,7 @@
               {/if}
               <th>Name</th>
               <th>Employee ID</th>
+              <th>Role</th>
               <th>Source</th>
               <th>Department</th>
               <th>Branch</th>
@@ -364,6 +383,7 @@
                   {#if !emp.isActive}<span class="badge badge-muted">Inactive</span>{/if}
                 </td>
                 <td class="cell-mono">{emp.employeeId ?? '—'}</td>
+                <td>{emp.position ?? '—'}</td>
                 <td>
                   <span class="src-badge {SOURCE_CLASS[emp.source ?? 'manual']}">{SOURCE_LABEL[emp.source ?? 'manual']}</span>
                 </td>
@@ -381,7 +401,7 @@
               </tr>
             {/each}
             {#if filtered.length === 0}
-              <tr><td colspan="9" class="empty-cell">No employees match your filters.</td></tr>
+              <tr><td colspan="10" class="empty-cell">No employees match your filters.</td></tr>
             {/if}
           </tbody>
         </table>

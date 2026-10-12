@@ -15,7 +15,11 @@
     ownership: 'company' | 'personal';
     description: string | null;
     warrantyExpiry: string | null;
+    purchaseDate: string | null;
     nextMaintenanceDate: string | null;
+    assetTag: string | null; propertyTag: string | null; imeiNumber: string | null;
+    computerName: string | null; macAddress: string | null;
+    metadata: Record<string, unknown> | null;
     lostAt: string | null;
     lostStolenNotes: string | null;
     createdAt: string; updatedAt: string;
@@ -32,8 +36,9 @@
     deviceProfile: {
       deviceType: 'computer' | 'laptop'; brand: string | null; model: string | null; deviceSerial: string | null;
       processor: string | null; motherboard: string | null; operatingSystem: string | null; osVersion: string | null; osInstallDate: string | null;
+      source?: string;
     } | null;
-    components: { id: string; type: 'ram' | 'storage'; slotOrBay: string | null; brand: string | null; model: string | null; serialNumber: string | null; capacity: string | null; storageKind: string | null }[];
+    components: { id: string; type: string; slotOrBay: string | null; brand: string | null; model: string | null; serialNumber: string | null; capacity: string | null; storageKind: string | null; propertyTag: string | null }[];
   }
 
   interface Category { id: string; name: string; }
@@ -59,7 +64,7 @@
   let showEdit   = $state(false);
   let editSaving = $state(false);
   let editErr    = $state('');
-  let editForm   = $state({ name: '', serialNumber: '', categoryId: '', branchId: '', condition: 'usable', ownership: 'company', description: '', warrantyExpiry: '' });
+  let editForm   = $state({ name: '', serialNumber: '', categoryId: '', branchId: '', condition: 'usable', ownership: 'company', description: '', warrantyExpiry: '', purchaseDate: '', vendor: '', internalNotes: '' });
 
   // Delete confirm
   let showDel  = $state(false);
@@ -88,6 +93,32 @@
   const assetId      = $derived($page.params.id);
   const assignee     = $derived(asset?.assignments?.[0]?.employee?.name ?? '—');
   const assigneeDept = $derived(asset?.assignments?.[0]?.employee?.department?.name ?? '—');
+
+  // Vendor and internal notes are kept in the asset's metadata.
+  function metaText(key: string): string {
+    const value = asset?.metadata?.[key];
+    return typeof value === 'string' ? value.trim() : '';
+  }
+
+  // RAM/storage belong to the device itself; every other component row is a
+  // peripheral attached to it (monitor, keyboard, UPS, …).
+  const isComputerAsset = $derived(/desktop|laptop|computer/i.test(asset?.category?.name ?? ''));
+  const hardwareParts   = $derived((asset?.components ?? []).filter(c => c.type === 'ram' || c.type === 'storage'));
+  const peripheralParts = $derived((asset?.components ?? []).filter(c => c.type !== 'ram' && c.type !== 'storage'));
+
+  const PART_LABELS: Record<string, string> = {
+    ups: 'UPS', avr: 'AVR', tv: 'TV', external_hdd: 'External HDD',
+    hdd_ssd_docking_station: 'HDD/SSD dock', nvme_docking_station: 'NVMe dock',
+  };
+  function partLabel(type: string): string {
+    const words = type.replace(/_/g, ' ');
+    return PART_LABELS[type] ?? words.charAt(0).toUpperCase() + words.slice(1);
+  }
+  // Manual entries store a bare number of GB; imported ones keep the sheet's own text ("16GB").
+  function fmtCapacity(capacity: string | null): string {
+    if (!capacity) return 'Capacity not provided';
+    return /^\d+(\.\d+)?$/.test(capacity) ? `${capacity} GB` : capacity;
+  }
 
   // ── Helpers ───────────────────────────────────────────────────────────────
   function fmtDate(iso: string | null | undefined): string {
@@ -157,6 +188,30 @@
   async function loadAttachments() {
     attachments = await api.get<Attachment[]>(`/api/assets/${$page.params.id}/attachments`).catch(() => []);
   }
+
+  // Photos added on the Add Asset form are image attachments; the image area
+  // steps through them. Downloads need the auth header, hence blob URLs.
+  const photoAttachments = $derived(attachments.filter((a) => a.mimeType.startsWith('image/')));
+  let photoUrls  = $state<Record<string, string>>({});
+  let photoIndex = $state(0);
+  const currentPhoto = $derived(photoUrls[photoAttachments[photoIndex]?.id ?? ''] ?? '');
+
+  async function loadPhoto(id: string) {
+    if (photoUrls[id]) return;
+    const res = await api.raw(`/api/assets/attachments/${id}/download`).catch(() => null);
+    if (!res?.ok) return;
+    photoUrls = { ...photoUrls, [id]: URL.createObjectURL(await res.blob()) };
+  }
+  $effect(() => {
+    if (photoIndex >= photoAttachments.length) photoIndex = 0;
+    const photo = photoAttachments[photoIndex];
+    if (photo) void loadPhoto(photo.id);
+  });
+  function stepPhoto(delta: number) {
+    if (photoAttachments.length < 2) return;
+    photoIndex = (photoIndex + delta + photoAttachments.length) % photoAttachments.length;
+  }
+  onDestroy(() => { for (const url of Object.values(photoUrls)) URL.revokeObjectURL(url); });
 
   function fmtSize(bytes: number): string {
     if (bytes < 1024) return `${bytes} B`;
@@ -272,6 +327,9 @@
       ownership: asset.ownership,
       description: asset.description ?? '',
       warrantyExpiry: asset.warrantyExpiry ? asset.warrantyExpiry.slice(0, 10) : '',
+      purchaseDate: asset.purchaseDate ? asset.purchaseDate.slice(0, 10) : '',
+      vendor: metaText('vendor'),
+      internalNotes: metaText('internalNotes'),
     };
     editErr = '';
     showEdit = true;
@@ -290,6 +348,9 @@
         ownership: editForm.ownership,
         description: editForm.description.trim() || null,
         warrantyExpiry: editForm.warrantyExpiry || null,
+        purchaseDate: editForm.purchaseDate || null,
+        vendor: editForm.vendor.trim() || null,
+        internalNotes: editForm.internalNotes.trim() || null,
       });
       showEdit = false;
     } catch (e) { editErr = (e as Error).message; }
@@ -564,19 +625,27 @@
 
         <!-- Image area -->
         <div class="img-area">
+          {#if currentPhoto}
+            <img class="img-photo" src={currentPhoto} alt="Photo of {asset.name}" />
+          {:else}
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="img-icon"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
           <span class="img-label">{asset.category?.name?.toUpperCase() ?? 'ASSET'}</span>
+          {/if}
         </div>
 
         <!-- Nav: arrows + dots (decorative) -->
         <div class="img-nav">
-          <button class="nav-arrow" aria-label="Previous image">
+          <button class="nav-arrow" aria-label="Previous image" onclick={() => stepPhoto(-1)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
           </button>
-          <span class="dot dot-on"></span>
-          <span class="dot"></span>
-          <span class="dot"></span>
-          <button class="nav-arrow" aria-label="Next image">
+          {#if photoAttachments.length > 1}
+            {#each photoAttachments as photo, i (photo.id)}<span class="dot" class:dot-on={i === photoIndex}></span>{/each}
+          {:else}
+            <span class="dot dot-on"></span>
+            <span class="dot"></span>
+            <span class="dot"></span>
+          {/if}
+          <button class="nav-arrow" aria-label="Next image" onclick={() => stepPhoto(1)}>
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
         </div>
@@ -658,6 +727,10 @@
               <span class="field-value">{fmtDate(asset.warrantyExpiry)}</span>
             </div>
             <div class="field">
+              <span class="field-label">Purchase Date</span>
+              <span class="field-value">{fmtDate(asset.purchaseDate)}</span>
+            </div>
+            <div class="field">
               <span class="field-label">Next Maintenance</span>
               <span class="field-value">{fmtDate(asset.nextMaintenanceDate)}</span>
             </div>
@@ -669,10 +742,34 @@
               <span class="field-label">Last Updated</span>
               <span class="field-value">{fmtDate(asset.updatedAt)}</span>
             </div>
+            {#if asset.assetTag}
+              <div class="field"><span class="field-label">Asset Tag</span><span class="field-value mono">{asset.assetTag}</span></div>
+            {/if}
+            {#if asset.propertyTag}
+              <div class="field"><span class="field-label">Property Tag</span><span class="field-value mono">{asset.propertyTag}</span></div>
+            {/if}
+            {#if asset.imeiNumber}
+              <div class="field"><span class="field-label">IMEI</span><span class="field-value mono">{asset.imeiNumber}</span></div>
+            {/if}
+            {#if asset.computerName}
+              <div class="field"><span class="field-label">Computer Name</span><span class="field-value mono">{asset.computerName}</span></div>
+            {/if}
+            {#if asset.macAddress}
+              <div class="field"><span class="field-label">MAC Address</span><span class="field-value mono">{asset.macAddress}</span></div>
+            {/if}
+            {#if metaText('vendor')}
+              <div class="field"><span class="field-label">Vendor / Supplier</span><span class="field-value">{metaText('vendor')}</span></div>
+            {/if}
             {#if asset.description}
               <div class="field field-wide">
                 <span class="field-label">Description</span>
                 <span class="field-value">{asset.description}</span>
+              </div>
+            {/if}
+            {#if metaText('internalNotes')}
+              <div class="field field-wide">
+                <span class="field-label">Internal Notes</span>
+                <span class="field-value">{metaText('internalNotes')}</span>
               </div>
             {/if}
           </div>
@@ -681,17 +778,37 @@
         <!-- Recent Activity section -->
         {#if asset.deviceProfile}
           <div class="rp-section" aria-labelledby="computer-profile-title">
-            <div class="section-head"><span class="section-title" id="computer-profile-title">Computer profile</span><span class="badge badge-blue">Manual</span></div>
+            <div class="section-head"><span class="section-title" id="computer-profile-title">{isComputerAsset ? 'Computer profile' : 'Device details'}</span><span class="badge badge-blue">{asset.deviceProfile.source === 'import' ? 'Imported' : 'Manual'}</span></div>
             <div class="field-grid">
-              <div class="field"><span class="field-label">Device type</span><span class="field-value">{asset.deviceProfile.deviceType === 'laptop' ? 'Laptop' : 'Desktop'}</span></div>
+              {#if isComputerAsset}
+                <div class="field"><span class="field-label">Device type</span><span class="field-value">{asset.deviceProfile.deviceType === 'laptop' ? 'Laptop' : 'Desktop'}</span></div>
+              {/if}
               <div class="field"><span class="field-label">Brand / model</span><span class="field-value">{[asset.deviceProfile.brand, asset.deviceProfile.model].filter(Boolean).join(' · ') || '—'}</span></div>
-              <div class="field"><span class="field-label">Device serial</span><span class="field-value mono">{asset.deviceProfile.deviceSerial ?? '—'}</span></div>
-              <div class="field"><span class="field-label">Processor</span><span class="field-value">{asset.deviceProfile.processor ?? '—'}</span></div>
-              <div class="field"><span class="field-label">Motherboard</span><span class="field-value">{asset.deviceProfile.motherboard ?? '—'}</span></div>
-              <div class="field"><span class="field-label">Operating system</span><span class="field-value">{[asset.deviceProfile.operatingSystem, asset.deviceProfile.osVersion].filter(Boolean).join(' · ') || '—'}</span></div>
+              {#if isComputerAsset || asset.deviceProfile.deviceSerial}
+                <div class="field"><span class="field-label">Device serial</span><span class="field-value mono">{asset.deviceProfile.deviceSerial ?? '—'}</span></div>
+              {/if}
+              {#if isComputerAsset || asset.deviceProfile.processor}
+                <div class="field"><span class="field-label">Processor</span><span class="field-value">{asset.deviceProfile.processor ?? '—'}</span></div>
+              {/if}
+              {#if isComputerAsset || asset.deviceProfile.motherboard}
+                <div class="field"><span class="field-label">Motherboard</span><span class="field-value">{asset.deviceProfile.motherboard ?? '—'}</span></div>
+              {/if}
+              {#if isComputerAsset || asset.deviceProfile.operatingSystem}
+                <div class="field"><span class="field-label">Operating system</span><span class="field-value">{[asset.deviceProfile.operatingSystem, asset.deviceProfile.osVersion].filter(Boolean).join(' · ') || '—'}</span></div>
+              {/if}
             </div>
-            <h3 class="subsection-title">RAM and storage</h3>
-            {#if asset.components.length === 0}<div class="act-empty">No component rows recorded.</div>{:else}<div class="component-list" aria-label="RAM and storage components">{#each asset.components as component}<div class="component-item"><strong>{component.type === 'ram' ? 'RAM' : 'Storage'}</strong><span>{[component.brand, component.model].filter(Boolean).join(' · ') || 'Unspecified'}</span><span>{component.capacity ?? 'Capacity not provided'}</span><span>{component.slotOrBay ?? '—'}</span></div>{/each}</div>{/if}
+            {#if isComputerAsset || hardwareParts.length > 0}
+              <h3 class="subsection-title">RAM and storage</h3>
+              {#if hardwareParts.length === 0}<div class="act-empty">No component rows recorded.</div>{:else}<div class="component-list" aria-label="RAM and storage components">{#each hardwareParts as component}<div class="component-item"><strong>{component.type === 'ram' ? 'RAM' : 'Storage'}</strong><span>{[component.brand, component.model].filter(Boolean).join(' · ') || 'Unspecified'}</span><span>{fmtCapacity(component.capacity)}</span><span>{component.slotOrBay ?? '—'}</span></div>{/each}</div>{/if}
+            {/if}
+          </div>
+        {/if}
+
+        <!-- Peripherals attached to this asset (monitor, keyboard, UPS, …) -->
+        {#if peripheralParts.length > 0}
+          <div class="rp-section" aria-labelledby="peripherals-title">
+            <div class="section-head"><span class="section-title" id="peripherals-title">Peripherals</span></div>
+            <div class="component-list" aria-label="Attached peripherals">{#each peripheralParts as part}<div class="component-item"><strong>{partLabel(part.type)}</strong><span>{[part.brand, part.model].filter(Boolean).join(' · ') || 'Unspecified'}</span><span class="mono">{part.serialNumber ?? 'No serial'}</span><span>{part.propertyTag ?? '—'}</span></div>{/each}</div>
           </div>
         {/if}
 
@@ -996,13 +1113,27 @@
               </select>
             </div>
           </div>
+          <div class="form-2col">
+            <div class="form-row">
+              <label class="form-label" for="e-warranty">Warranty Expiry</label>
+              <input id="e-warranty" class="form-input" type="date" bind:value={editForm.warrantyExpiry} />
+            </div>
+            <div class="form-row">
+              <label class="form-label" for="e-purchase">Purchase Date</label>
+              <input id="e-purchase" class="form-input" type="date" bind:value={editForm.purchaseDate} />
+            </div>
+          </div>
           <div class="form-row">
-            <label class="form-label" for="e-warranty">Warranty Expiry</label>
-            <input id="e-warranty" class="form-input" type="date" bind:value={editForm.warrantyExpiry} />
+            <label class="form-label" for="e-vendor">Vendor / Supplier</label>
+            <input id="e-vendor" class="form-input" type="text" bind:value={editForm.vendor} placeholder="e.g. Dell Technologies" />
           </div>
           <div class="form-row">
             <label class="form-label" for="e-desc">Description</label>
             <textarea id="e-desc" class="form-ta" bind:value={editForm.description} rows="3" placeholder="Optional notes…"></textarea>
+          </div>
+          <div class="form-row">
+            <label class="form-label" for="e-notes">Internal Notes</label>
+            <textarea id="e-notes" class="form-ta" bind:value={editForm.internalNotes} rows="2" placeholder="Optional internal notes…"></textarea>
           </div>
           {#if editErr}
             <div class="form-err">{editErr}</div>
@@ -1441,6 +1572,7 @@
   }
 
   .img-icon { flex-shrink: 0; }
+  .img-photo { max-width: 100%; max-height: 320px; object-fit: contain; border-radius: var(--r-md); }
 
   .img-label {
     font-size: 11px;

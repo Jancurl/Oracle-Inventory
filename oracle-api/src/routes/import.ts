@@ -574,7 +574,10 @@ router.post(
     // Auto-create or fuzzy-reuse category from categoryName
     let resolvedCategoryId = categoryId;
     let categoriesCreated = 0;
-    if (!resolvedCategoryId && categoryName) {
+    // The sheet-level category is only the fallback for rows without their own
+    // Category value — don't create it when every row already names one.
+    const needsSheetCategory = clientRows.some((r) => !(r.mappedData as Record<string, unknown>).categoryHint && !(r.rowIndex in rowCategoryOverrides));
+    if (!resolvedCategoryId && categoryName && needsSheetCategory) {
       const allCategories = await prisma.category.findMany({ select: { id: true, name: true } });
       const best = allCategories
         .map((c) => ({ ...c, sim: stringSimilarity(c.name, categoryName) }))
@@ -865,8 +868,11 @@ router.post(
       ])
     );
 
+    const categoryNames = new Map((await prisma.category.findMany({ select: { id: true, name: true } })).map((c) => [c.id, c.name]));
+
     // Run import
     const result = await executeImport(clientRows as ValidatedRow[], {
+      categoryNames,
       importHistoryId:   importHistory.id,
       categoryId:        resolvedCategoryId,
       branchId:          branchId ?? null,
@@ -998,16 +1004,16 @@ router.delete("/presets/:id", requirePermission("import_inventory"), async (req:
 // GET /api/import/template/:category
 // ─────────────────────────────────────────────────────────────────────────────
 const CATEGORY_TEMPLATES: Record<string, string[]> = {
-  "Computers":       ["Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Device Type", "Condition", "Assigned User", "Branch", "Warranty Expiry", "Notes"],
-  "Laptops":         ["Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Condition", "Assigned User", "Branch", "Warranty Expiry", "Notes"],
-  "Desktops":        ["Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Condition", "Assigned User", "Branch", "Warranty Expiry", "Notes"],
-  "Company Phones":  ["IMEI Number", "Brand", "Model", "Serial Number", "Property Tag", "SIM Info", "Condition", "Assigned User", "Branch", "Notes"],
+  "Computers":       ["Asset Name", "Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Device Type", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Laptops":         ["Asset Name", "Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Desktops":        ["Asset Name", "Asset Tag Number", "Computer Name", "Brand", "Model", "Serial Number", "MAC Address", "Operating System", "RAM", "Storage", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Company Phones":  ["Asset Name", "IMEI Number", "Brand", "Model", "Serial Number", "Property Tag", "SIM Info", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
   "Email Accounts":  ["Email Address", "Assigned User", "Storage", "Branch", "Notes"],
-  "Monitors":        ["Asset Tag Number", "Brand", "Model", "Serial Number", "Condition", "Assigned User", "Branch", "Warranty Expiry", "Notes"],
-  "Printers":        ["Asset Tag Number", "Brand", "Model", "Serial Number", "Condition", "Assigned User", "Branch", "Warranty Expiry", "Notes"],
-  "Network Devices": ["Asset Tag Number", "Brand", "Model", "Serial Number", "MAC Address", "Condition", "Branch", "Notes"],
-  "Peripherals":     ["Asset Name", "Brand", "Model", "Serial Number", "Condition", "Assigned User", "Branch", "Notes"],
-  "Accessories":     ["Asset Name", "Brand", "Model", "Serial Number", "Condition", "Assigned User", "Branch", "Notes"],
+  "Monitors":        ["Asset Name", "Asset Tag Number", "Brand", "Model", "Serial Number", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Printers":        ["Asset Name", "Asset Tag Number", "Brand", "Model", "Serial Number", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Network Devices": ["Asset Name", "Asset Tag Number", "Brand", "Model", "Serial Number", "MAC Address", "Condition", "Ownership", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Peripherals":     ["Asset Name", "Category", "Brand", "Model", "Serial Number", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
+  "Accessories":     ["Asset Name", "Category", "Brand", "Model", "Serial Number", "Condition", "Ownership", "Assigned User", "Branch", "Purchase Date", "Warranty Expiry", "Notes"],
 };
 
 router.get("/template/:category", requirePermission("import_inventory"), (req: AuthRequest, res: Response) => {

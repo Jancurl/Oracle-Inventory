@@ -24,8 +24,8 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       window.location.href = '/login';
       throw new Error('Unauthorized');
     }
-    const body = await res.json().catch(() => ({}));
-    throw new Error((body as { error?: string }).error ?? `HTTP ${res.status}`);
+    const body = await res.json().catch(() => ({})) as { error?: string; code?: string };
+    throw Object.assign(new Error(body.error ?? `HTTP ${res.status}`), { status: res.status, code: body.code });
   }
   if (res.status === 204) return undefined as T;
   return res.json() as T;

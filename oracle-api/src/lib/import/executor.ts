@@ -1,5 +1,5 @@
 import { prisma } from "../prisma";
-import { ValidatedRow } from "./validator";
+import { ValidatedRow, parseImportDate } from "./validator";
 import { DuplicateInfo } from "./duplicateChecker";
 import { logActivity } from "../activity";
 
@@ -16,6 +16,7 @@ export interface ExecuteOptions {
   resolvedEmployees: Map<number, string>; // rowIndex → employeeId
   rowBranchOverrides?: Map<number, string>;    // per-row branch remaps from preview UI
   rowCategoryOverrides?: Map<number, string>;  // per-row category overrides (OPC multi-schema)
+  categoryNames?: Map<string, string>;         // categoryId → name, to tell a laptop from a desktop
 }
 
 export interface ExecuteResult {
@@ -28,6 +29,67 @@ export interface ExecuteResult {
   categoriesCreated: number;
   employeesCreated: number;
   employeesUpdated: number;
+}
+
+function text(value: unknown): string | null {
+  if (value === null || value === undefined) return null;
+  return String(value).trim() || null;
+}
+
+/** "8GB + 8GB" or "SSD 512GB, HDD 1TB" → one component row per part. */
+function componentParts(value: unknown): string[] {
+  return (text(value) ?? "").split(/\s*[+,;]\s*/).map((part) => part.trim()).filter(Boolean).slice(0, 8);
+}
+
+/**
+ * Brand, model, OS, processor, RAM and storage have no column on Asset — they
+ * live on the device profile and its component rows, which is what the asset
+ * page reads. Without this they were only kept in the raw metadata JSON and
+ * never shown anywhere.
+ */
+async function saveDeviceDetails(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tx: any,
+  assetId: string,
+  mappedData: Record<string, unknown>,
+  meta: Record<string, unknown>,
+  serialNumber: string | null,
+  replaceComponents: boolean,
+  categoryName: string
+): Promise<void> {
+  const brand = text(mappedData.brand ?? meta.brand);
+  const model = text(mappedData.model ?? meta.model);
+  const operatingSystem = text(meta.os);
+  const processor = text(meta.processor);
+  const ram = componentParts(meta.ram);
+  const storage = componentParts(meta.storage);
+  if (!brand && !model && !operatingSystem && !processor && ram.length === 0 && storage.length === 0) return;
+
+  const typeHint = `${text(mappedData.deviceType ?? meta.deviceType) ?? ""} ${text(mappedData.categoryHint) ?? ""} ${categoryName}`;
+  const details = {
+    ...(brand ? { brand } : {}),
+    ...(model ? { model } : {}),
+    ...(operatingSystem ? { operatingSystem } : {}),
+    ...(processor ? { processor } : {}),
+    ...(serialNumber ? { deviceSerial: serialNumber } : {}),
+  };
+  const profile = await tx.deviceProfile.upsert({
+    where: { assetId },
+    create: { assetId, deviceType: /laptop|notebook/i.test(typeHint) ? "laptop" : "computer", source: "import", ...details },
+    update: details,
+  });
+
+  if (ram.length === 0 && storage.length === 0) return;
+  if (replaceComponents) {
+    // Overwrite re-imports the same row: replace what the last import wrote, keep manual rows.
+    await tx.assetComponent.deleteMany({ where: { assetId, source: "import", type: { in: ["ram", "storage"] } } });
+  }
+  await tx.assetComponent.createMany({
+    data: [
+      ...ram.map((capacity) => ({ assetId, deviceProfileId: profile.id, type: "ram", capacity, source: "import" })),
+      ...storage.map((capacity) => ({ assetId, deviceProfileId: profile.id, type: "storage", capacity, source: "import" })),
+    ],
+  });
 }
 
 async function processRow(
@@ -50,20 +112,28 @@ async function processRow(
     return;
   }
 
+  const meta = (mappedData.metadata as Record<string, unknown> | null | undefined) ?? {};
+  const serialNumber = text(mappedData.serialNumber);
+
   const assetData = {
-    name:               String(mappedData.name ?? "Unnamed Asset"),
-    serialNumber:       mappedData.serialNumber  ? String(mappedData.serialNumber)  : null,
-    assetTag:           mappedData.assetTag       ? String(mappedData.assetTag)       : null,
-    computerName:       mappedData.computerName   ? String(mappedData.computerName)   : null,
-    imeiNumber:         mappedData.imeiNumber     ? String(mappedData.imeiNumber)     : null,
-    propertyTag:        mappedData.propertyTag    ? String(mappedData.propertyTag)    : null,
-    macAddress:         mappedData.macAddress     ? String(mappedData.macAddress)     : null,
+    name:               text(mappedData.name) ?? "Unnamed Asset",
+    serialNumber,
+    assetTag:           text(mappedData.assetTag),
+    // Single-sheet imports map these three columns into metadata; the
+    // multi-sheet extractors set them at the top level. Read both.
+    computerName:       text(mappedData.computerName ?? meta.computerName),
+    imeiNumber:         text(mappedData.imeiNumber   ?? meta.imeiNumber),
+    propertyTag:        text(mappedData.propertyTag),
+    macAddress:         text(mappedData.macAddress   ?? meta.macAddress),
     metadata:           mappedData.metadata ?? null,
     condition:          (mappedData.condition  as string)  ?? "usable",
     ownership:          (mappedData.ownership  as string)  ?? "company",
-    description:        mappedData.description  ? String(mappedData.description)  : null,
-    warrantyExpiry:     mappedData.warrantyExpiry     ? new Date(String(mappedData.warrantyExpiry))     : null,
-    nextMaintenanceDate:mappedData.nextMaintenanceDate ? new Date(String(mappedData.nextMaintenanceDate)): null,
+    description:        text(mappedData.description),
+    // parseImportDate returns null for an unreadable value, so one bad date
+    // cell can no longer fail the whole 50-row chunk.
+    warrantyExpiry:     parseImportDate(mappedData.warrantyExpiry),
+    purchaseDate:       parseImportDate(mappedData.purchaseDate),
+    nextMaintenanceDate:parseImportDate(mappedData.nextMaintenanceDate),
     categoryId:         opts.rowCategoryOverrides?.get(rowIndex) ?? opts.categoryId,
     branchId:           opts.rowBranchOverrides?.get(rowIndex) ?? opts.branchId,
     importId:           opts.importHistoryId,
@@ -93,6 +163,9 @@ async function processRow(
       data: { outcome: "imported", assetId },
     });
   }
+
+  const categoryName = (assetData.categoryId && opts.categoryNames?.get(assetData.categoryId)) || "";
+  await saveDeviceDetails(tx, assetId, mappedData, meta, serialNumber, shouldOverwrite, categoryName);
 
   // Employee linking
   const employeeId = opts.resolvedEmployees.get(rowIndex);

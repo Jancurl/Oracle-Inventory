@@ -79,6 +79,7 @@
   let frequentAssets = $state<FrequentAsset[]>([]);
   let infra         = $state<InfraSummary | null>(null);
   let loading       = $state(true);
+  let loadErr       = $state('');
   let search        = $state('');
   let dateFrom      = $state('');
   let dateTo        = $state('');
@@ -189,8 +190,22 @@
     if (dateFrom) params.set('from', dateFrom);
     if (dateTo)   params.set('to',   dateTo);
     const qs = params.size ? `?${params}` : '';
-    const sum = await api.get<Summary>(`/api/reports/summary${qs}`).catch(() => null);
-    if (sum) summary = sum;
+    try {
+      if (can('view_reports')) {
+        summary = await api.get<Summary>(`/api/reports/summary${qs}`);
+      } else {
+        // The report endpoints are closed to this role; the headline counts
+        // come from the inventory stats it is allowed to read instead.
+        const stats = await api.get<{ total: number; assigned: number; available: number; forRepair: number; forDisposal: number }>('/api/assets/stats');
+        summary = {
+          kpi: { totalAssets: stats.total, assigned: stats.assigned, available: stats.available, forRepair: stats.forRepair, forDisposal: stats.forDisposal },
+          movementsByMonth: [], topCategories: [], branchStats: [], deptStats: [], recentMovements: [],
+        };
+      }
+      loadErr = '';
+    } catch (e) {
+      loadErr = (e as Error).message || 'Dashboard data could not be loaded.';
+    }
   }
 
   // ── Data fetch ─────────────────────────────────────────────────────────────
@@ -201,8 +216,12 @@
       can('access_logs')
         ? api.get<{ logs: ActivityLog[] }>('/api/activity?limit=15').catch(() => null)
         : Promise.resolve(null),
-      api.get<{ months: TrendMonth[] }>('/api/reports/condition-trend').catch(() => null),
-      api.get<{ assets: FrequentAsset[] }>('/api/reports/movement-frequency?limit=10').catch(() => null),
+      can('view_reports')
+        ? api.get<{ months: TrendMonth[] }>('/api/reports/condition-trend').catch(() => null)
+        : Promise.resolve(null),
+      can('view_reports')
+        ? api.get<{ assets: FrequentAsset[] }>('/api/reports/movement-frequency?limit=10').catch(() => null)
+        : Promise.resolve(null),
       can('view_reports')
         ? api.get<InfraSummary>('/api/reports/infrastructure-summary').catch(() => null)
         : Promise.resolve(null),
@@ -248,6 +267,13 @@
       {/if}
     </div>
   </div>
+
+  {#if loadErr}
+    <div class="load-error" role="alert">
+      <span>Dashboard data could not be loaded: {loadErr}</span>
+      <button class="load-error-retry" onclick={() => loadDashboard()}>Retry</button>
+    </div>
+  {/if}
 
   <!-- ── Stat cards — row 1 (3 col) ──────────────────────────────────────── -->
   <div class="stat-row stat-row--3">
@@ -616,6 +642,9 @@
 </div>
 
 <style>
+  .load-error { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 10px 14px; border: 1px solid var(--error); border-radius: var(--r-md); background: var(--error-soft); color: var(--error); font-size: 13px; }
+  .load-error-retry { border: 1px solid var(--error); background: transparent; color: var(--error); border-radius: var(--r-sm); padding: 4px 10px; font-size: 12px; cursor: pointer; }
+
   /* ── Page layout ── */
   .page {
     display: flex;

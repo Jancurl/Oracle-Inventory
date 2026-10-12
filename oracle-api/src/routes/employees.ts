@@ -83,9 +83,28 @@ router.get("/:id", requirePermission("view_inventory"), async (req: AuthRequest,
 // Sequential EMP-### fallback when neither the admin nor Zoho supplies an
 // employeeId. `offset` lets the retry loop below step past a collision from
 // a race with another concurrent create.
+// Numbered from the highest existing EMP-### rather than the row count: after
+// any delete, count + 1 lands on an ID that is still taken.
 async function nextEmployeeId(offset = 0): Promise<string> {
-  const count = await prisma.employee.count();
-  return `EMP-${String(count + 1 + offset).padStart(3, "0")}`;
+  const rows = await prisma.employee.findMany({
+    where: { employeeId: { startsWith: "EMP-" } },
+    select: { employeeId: true },
+  });
+  let highest = 0;
+  for (const row of rows) {
+    const match = /^EMP-(\d+)$/.exec(row.employeeId ?? "");
+    if (match) highest = Math.max(highest, Number(match[1]));
+  }
+  return `EMP-${String(highest + 1 + offset).padStart(3, "0")}`;
+}
+
+// Prisma reports the conflicting columns as meta.target on the built-in
+// engine, but under a driver adapter (PrismaPg) they arrive nested instead.
+function uniqueConflictFields(e: unknown): string[] {
+  const meta = (e as { meta?: { target?: unknown; driverAdapterError?: { cause?: { constraint?: { fields?: unknown } } } } })?.meta;
+  return [meta?.target, meta?.driverAdapterError?.cause?.constraint?.fields]
+    .flat()
+    .filter((field): field is string => typeof field === "string");
 }
 
 // POST /api/employees
@@ -97,8 +116,20 @@ async function nextEmployeeId(offset = 0): Promise<string> {
 // that (no email, or no Zoho match), one is auto-generated (EMP-###) rather
 // than blocking the save.
 router.post("/", requirePermission("manage_stock"), async (req: AuthRequest, res: Response) => {
-  const { name, email, phone, employeeId, branchId, departmentId, position } = req.body;
+  const { name, phone, branchId, departmentId, position } = req.body;
+  const email = typeof req.body.email === "string" ? req.body.email.trim() : "";
+  const employeeId = typeof req.body.employeeId === "string" ? req.body.employeeId.trim() : "";
   if (!name) { res.status(400).json({ error: "Employee name is required." }); return; }
+
+  // Name the record that already holds the value, so a conflict is traceable.
+  if (email) {
+    const holder = await prisma.employee.findUnique({ where: { email }, select: { name: true } });
+    if (holder) { res.status(409).json({ error: `That email is already used by ${holder.name}.` }); return; }
+  }
+  if (employeeId) {
+    const holder = await prisma.employee.findUnique({ where: { employeeId }, select: { name: true } });
+    if (holder) { res.status(409).json({ error: `Employee ID ${employeeId} is already used by ${holder.name}.` }); return; }
+  }
 
   let resolvedEmployeeId: string | null = employeeId || null;
   let resolvedDepartmentId: string | null = departmentId || null;
@@ -140,10 +171,14 @@ router.post("/", requirePermission("manage_stock"), async (req: AuthRequest, res
       return;
     } catch (e) {
       const isUniqueConflict = typeof e === "object" && e !== null && (e as { code?: string }).code === "P2002";
-      const conflictedOnEmployeeId = isUniqueConflict && (e as { meta?: { target?: string[] } }).meta?.target?.includes("employeeId");
-      if (conflictedOnEmployeeId && autoAssignId) continue;
-      if (isUniqueConflict) { res.status(409).json({ error: "That email or employee ID is already in use." }); return; }
-      throw e;
+      if (!isUniqueConflict) throw e;
+      const fields = uniqueConflictFields(e);
+      const conflictedOnEmail = fields.some((field) => field.toLowerCase().includes("email"));
+      if (conflictedOnEmail) { res.status(409).json({ error: "That email is already in use by another employee." }); return; }
+      // An auto-generated ID that collided is retried with the next number.
+      if (autoAssignId) continue;
+      res.status(409).json({ error: `Employee ID ${resolvedEmployeeId} is already in use by another employee.` });
+      return;
     }
   }
   res.status(500).json({ error: "Could not generate a unique employee ID. Try entering one manually." });
@@ -157,13 +192,23 @@ router.put("/:id", requirePermission("manage_stock"), async (req: AuthRequest, r
   const existing = await prisma.employee.findUnique({ where: { id: req.params.id } });
   if (!existing) { res.status(404).json({ error: "Employee not found" }); return; }
 
+  if (email && email !== existing.email) {
+    const holder = await prisma.employee.findUnique({ where: { email }, select: { name: true } });
+    if (holder) { res.status(409).json({ error: `That email is already used by ${holder.name}.` }); return; }
+  }
+  if (employeeId && employeeId !== existing.employeeId) {
+    const holder = await prisma.employee.findUnique({ where: { employeeId }, select: { name: true } });
+    if (holder) { res.status(409).json({ error: `Employee ID ${employeeId} is already used by ${holder.name}.` }); return; }
+  }
+
   const employee = await prisma.employee.update({
     where: { id: req.params.id },
     data: {
       name,
       email:        email    || null,
       phone:        phone    || null,
-      position:     position || null,
+      // Callers that predate the position field omit it; that must not wipe it.
+      position:     position !== undefined ? (position || null) : existing.position,
       employeeId:   employeeId   || existing.employeeId,
       branchId:     branchId     || null,
       departmentId: departmentId || null,

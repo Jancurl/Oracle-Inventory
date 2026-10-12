@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { validateRows } from "../validator";
+import { validateRows, parseImportDate } from "../validator";
 import type { FieldMapping } from "../mapper";
 
 const BASE_MAPPINGS: FieldMapping[] = [
@@ -99,5 +99,88 @@ describe("validateRows – categoryHint and employeeId pass-through", () => {
     const rows = [{ Name: "Laptop", "Employee ID": "EMP-001" }];
     const validated = validateRows(rows, mappings, "Peripherals");
     expect(validated[0].mappedData.employeeId).toBe("EMP-001");
+  });
+});
+
+// ── Dates ─────────────────────────────────────────────────────────────────────
+
+describe("parseImportDate", () => {
+  const day = (value: unknown) => parseImportDate(value)?.toISOString().slice(0, 10) ?? null;
+
+  it("reads the forms a spreadsheet produces as the same calendar day", () => {
+    expect(day("2028-01-15")).toBe("2028-01-15");
+    expect(day("1/15/28")).toBe("2028-01-15");
+    expect(day("01/15/2028")).toBe("2028-01-15");
+    expect(day("15-Jan-28")).toBe("2028-01-15");
+    expect(day("Jan 15, 2028")).toBe("2028-01-15");
+  });
+
+  it("falls back to day/month/year only when month/day/year is impossible", () => {
+    expect(day("31/12/2027")).toBe("2027-12-31");
+    expect(day("3/5/2025")).toBe("2025-03-05");
+  });
+
+  it("reads a raw Excel serial number", () => {
+    expect(day("46500")).toBe("2027-04-23");
+  });
+
+  it("returns null for text, impossible dates and stray numbers", () => {
+    expect(day("not sure")).toBeNull();
+    expect(day("N/A")).toBeNull();
+    expect(day("31/02/2027")).toBeNull();
+    expect(day("123")).toBeNull();
+    expect(day("")).toBeNull();
+  });
+
+  it("always lands on UTC midnight", () => {
+    expect(parseImportDate("1/15/28")?.toISOString()).toBe("2028-01-15T00:00:00.000Z");
+  });
+});
+
+describe("validateRows – dates", () => {
+  const mappings: FieldMapping[] = [
+    { fileColumn: "Name", systemField: "name", isMetadata: false },
+    { fileColumn: "Warranty Expiry", systemField: "warrantyExpiry", isMetadata: false },
+    { fileColumn: "Purchase Date", systemField: "purchaseDate", isMetadata: false },
+  ];
+
+  it("normalises warranty and purchase dates", () => {
+    const [row] = validateRows([{ Name: "Laptop", "Warranty Expiry": "1/15/28", "Purchase Date": "2025-01-15" }], mappings, "Peripherals");
+    expect(row.mappedData.warrantyExpiry).toBe("2028-01-15T00:00:00.000Z");
+    expect(row.mappedData.purchaseDate).toBe("2025-01-15T00:00:00.000Z");
+  });
+
+  it("keeps the row importable when a date cannot be read", () => {
+    const [row] = validateRows([{ Name: "Laptop", "Warranty Expiry": "not sure" }], mappings, "Peripherals");
+    expect(row.isValid).toBe(true);
+    expect(row.mappedData.warrantyExpiry).toBeUndefined();
+    expect(row.warnings.some((w) => w.field === "warrantyExpiry")).toBe(true);
+  });
+});
+
+// ── Name derived from Brand / Model ───────────────────────────────────────────
+
+describe("validateRows – name fallback", () => {
+  const mappings: FieldMapping[] = [
+    { fileColumn: "Brand", systemField: "metadata", isMetadata: true, metadataKey: "brand" },
+    { fileColumn: "Model", systemField: "metadata", isMetadata: true, metadataKey: "model" },
+    { fileColumn: "Computer Name", systemField: "metadata", isMetadata: true, metadataKey: "computerName" },
+    { fileColumn: "Serial Number", systemField: "serialNumber", isMetadata: false },
+  ];
+
+  it("builds the name from brand and model when there is no name column", () => {
+    const [row] = validateRows([{ Brand: "Acer", Model: "Aspire 5", "Serial Number": "SN1" }], mappings, "Laptops");
+    expect(row.mappedData.name).toBe("Acer Aspire 5");
+    expect(row.isValid).toBe(true);
+  });
+
+  it("uses the computer name when brand and model are blank", () => {
+    const [row] = validateRows([{ "Computer Name": "HR-LT-01", "Serial Number": "SN2" }], mappings, "Laptops");
+    expect(row.mappedData.name).toBe("HR-LT-01");
+  });
+
+  it("still requires a name when nothing can stand in for it", () => {
+    const [row] = validateRows([{ "Serial Number": "SN3" }], mappings, "Laptops");
+    expect(row.isValid).toBe(false);
   });
 });

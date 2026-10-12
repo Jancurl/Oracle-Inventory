@@ -20,18 +20,6 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
   // Relation filter for assignment counts when scoped by branch/category
   const assignAssetFilter = Object.keys(assetWhere).length ? { asset: assetWhere } : {};
 
-  const [totalAssets, forRepair, forDisposal] = await Promise.all([
-    prisma.asset.count({ where: assetWhere }),
-    prisma.asset.count({ where: { ...assetWhere, condition: "for_repair" } }),
-    prisma.asset.count({ where: { ...assetWhere, condition: "for_disposal" } }),
-  ]);
-
-  const assignedAssets = await prisma.assetAssignment.findMany({
-    where: { status: "active", ...assignAssetFilter },
-    select: { assetId: true },
-    distinct: ["assetId"],
-  });
-
   // Movements by month — from/to window if provided, otherwise last 6 months
   const now = new Date();
   const fromDate = from ? new Date(from) : null;
@@ -52,7 +40,7 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
     }
   }
 
-  const movementsByMonth = await Promise.all(
+  const movementsByMonthQuery = Promise.all(
     monthStarts.map(async (start) => {
       const end = new Date(start.getFullYear(), start.getMonth() + 1, 1);
       const monthLabel = start.toLocaleString("default", { month: "short" });
@@ -74,15 +62,58 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
     })
   );
 
+  // Every aggregate below is independent, so they run together instead of one
+  // database round trip after another.
+  const [totalAssets, forRepair, forDisposal, assignedAssets, movementsByMonth, allAssets, activeAssignments, recentMovements] = await Promise.all([
+    prisma.asset.count({ where: assetWhere }),
+    prisma.asset.count({ where: { ...assetWhere, condition: "for_repair" } }),
+    prisma.asset.count({ where: { ...assetWhere, condition: "for_disposal" } }),
+    prisma.assetAssignment.findMany({
+      where: { status: "active", ...assignAssetFilter },
+      select: { assetId: true },
+      distinct: ["assetId"],
+    }),
+    movementsByMonthQuery,
+    // One asset read feeds both the category and the branch breakdown.
+    prisma.asset.findMany({
+      where: assetWhere,
+      select: {
+        categoryId: true,
+        category: { select: { name: true } },
+        branchId: true,
+        branch: { select: { name: true } },
+        assignments: { where: { status: "active" }, select: { id: true } },
+      },
+    }),
+    // Department stats — assets reach departments through employee assignments
+    prisma.assetAssignment.findMany({
+      where: { status: "active", ...assignAssetFilter },
+      select: {
+        assetId: true,
+        employee: {
+          select: { id: true, department: { select: { name: true } } },
+        },
+      },
+    }),
+    // Recent asset movements — assignment history widget
+    prisma.movementLog.findMany({
+      where: {
+        type: { in: ["assignment", "transfer", "return_approved", "resignation", "new_hire"] },
+        ...(Object.keys(assetWhere).length ? { asset: assetWhere } : {}),
+      },
+      orderBy: { createdAt: "desc" },
+      take: 8,
+      select: {
+        id: true,
+        type: true,
+        createdAt: true,
+        asset: { select: { name: true, assetTag: true } },
+        employee: { select: { name: true } },
+      },
+    }),
+  ]);
+
   // Top categories by asset count
-  const allAssets = await prisma.asset.findMany({
-    where: assetWhere,
-    select: {
-      categoryId: true,
-      category: { select: { name: true } },
-      assignments: { where: { status: "active" }, select: { id: true } },
-    },
-  });
 
   const catMap = new Map<string, { name: string; count: number; assigned: number }>();
   for (const a of allAssets) {
@@ -98,17 +129,8 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
     .slice(0, 5);
 
   // Branch utilization
-  const branchAssets = await prisma.asset.findMany({
-    where: assetWhere,
-    select: {
-      branchId: true,
-      branch: { select: { name: true } },
-      assignments: { where: { status: "active" as const }, select: { id: true } },
-    },
-  });
-
   const branchMap = new Map<string, { name: string; total: number; assigned: number }>();
-  for (const a of branchAssets) {
+  for (const a of allAssets) {
     const key  = a.branchId ?? "__none__";
     const name = a.branch?.name ?? "Unassigned";
     if (!branchMap.has(key)) branchMap.set(key, { name, total: 0, assigned: 0 });
@@ -117,17 +139,6 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
     if (a.assignments.length > 0) entry.assigned++;
   }
   const branchStats = [...branchMap.values()].sort((a, b) => b.total - a.total);
-
-  // Department stats — assets reach departments through employee assignments
-  const activeAssignments = await prisma.assetAssignment.findMany({
-    where: { status: "active", ...assignAssetFilter },
-    select: {
-      assetId: true,
-      employee: {
-        select: { id: true, department: { select: { name: true } } },
-      },
-    },
-  });
 
   const deptMap = new Map<string, { name: string; assets: number; employees: Set<string> }>();
   for (const a of activeAssignments) {
@@ -140,23 +151,6 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
   const deptStats = [...deptMap.values()]
     .map((d) => ({ name: d.name, assets: d.assets, employees: d.employees.size }))
     .sort((a, b) => b.assets - a.assets);
-
-  // Recent asset movements — assignment history widget
-  const recentMovements = await prisma.movementLog.findMany({
-    where: {
-      type: { in: ["assignment", "transfer", "return_approved", "resignation", "new_hire"] },
-      ...(Object.keys(assetWhere).length ? { asset: assetWhere } : {}),
-    },
-    orderBy: { createdAt: "desc" },
-    take: 8,
-    select: {
-      id: true,
-      type: true,
-      createdAt: true,
-      asset: { select: { name: true, assetTag: true } },
-      employee: { select: { name: true } },
-    },
-  });
 
   res.json({
     kpi: {
