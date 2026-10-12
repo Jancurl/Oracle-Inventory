@@ -165,7 +165,8 @@ app.use((error: unknown, _req: Request, res: Response, next: NextFunction) => {
     message: rawMessage.replace(/postgres(?:ql)?:\/\/\S+/gi, "[REDACTED_DATABASE_URL]"),
   });
 
-  if (databaseUnavailableCodes.has(code) || known.name === "PrismaClientInitializationError") {
+  // DriverAdapterError is how the pg driver reports connection-level failures, such as the pooler having no free slot.
+  if (databaseUnavailableCodes.has(code) || known.name === "PrismaClientInitializationError" || known.name === "DriverAdapterError") {
     res.status(503).json({ error: "The database is not reachable right now. Please try again in a few minutes." });
     return;
   }
