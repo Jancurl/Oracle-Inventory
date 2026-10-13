@@ -175,7 +175,7 @@ router.post("/", requirePermission("create_inventory"), async (req: AuthRequest,
 
 // PUT /api/assets/:id
 router.put("/:id", requirePermission("edit_inventory"), async (req: AuthRequest, res: Response) => {
-  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, purchaseDate, nextMaintenanceDate, imeiNumber, propertyTag } = req.body;
+  const { name, serialNumber, categoryId, branchId, condition, ownership, description, warrantyExpiry, purchaseDate, nextMaintenanceDate, imeiNumber, propertyTag, computerName, macAddress } = req.body;
   if (!name) { res.status(400).json({ error: "Asset name is required." }); return; }
 
   const warrantyDate = parseDateInput(warrantyExpiry);
@@ -206,6 +206,8 @@ router.put("/:id", requirePermission("edit_inventory"), async (req: AuthRequest,
       nextMaintenanceDate: nextMaintenanceDate !== undefined ? maintenanceDate : existing.nextMaintenanceDate,
       imeiNumber: imeiNumber !== undefined ? (imeiNumber || null) : existing.imeiNumber,
       propertyTag: propertyTag !== undefined ? (propertyTag || null) : existing.propertyTag,
+      computerName: computerName !== undefined ? (String(computerName ?? "").trim() || null) : existing.computerName,
+      macAddress: macAddress !== undefined ? (String(macAddress ?? "").trim() || null) : existing.macAddress,
     },
     include,
   });
@@ -244,6 +246,23 @@ const componentTypes = new Set([
   "external_hdd", "hdd_ssd_docking_station", "nvme_docking_station",
 ]);
 
+const hardwareTypes = new Set(["ram", "storage"]);
+
+function componentData(assetId: string, row: Record<string, unknown>) {
+  const clean = (value: unknown) => (typeof value === "string" ? value.trim() || null : null);
+  return {
+    assetId,
+    type: row.type as never,
+    slotOrBay: clean(row.slotOrBay),
+    brand: clean(row.brand),
+    model: clean(row.model),
+    serialNumber: clean(row.serialNumber),
+    capacity: clean(row.capacity),
+    storageKind: clean(row.storageKind),
+    propertyTag: clean(row.propertyTag),
+  };
+}
+
 // POST /api/assets/:id/components
 router.post("/:id/components", requirePermission("edit_inventory"), async (req: AuthRequest, res: Response) => {
   const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
@@ -256,23 +275,42 @@ router.post("/:id/components", requirePermission("edit_inventory"), async (req: 
   }
 
   const created = await prisma.$transaction(
-    rows.map((row: Record<string, unknown>) => prisma.assetComponent.create({
-      data: {
-        assetId: asset.id,
-        type: row.type as never,
-        slotOrBay: typeof row.slotOrBay === "string" ? row.slotOrBay.trim() || null : null,
-        brand: typeof row.brand === "string" ? row.brand.trim() || null : null,
-        model: typeof row.model === "string" ? row.model.trim() || null : null,
-        serialNumber: typeof row.serialNumber === "string" ? row.serialNumber.trim() || null : null,
-        capacity: typeof row.capacity === "string" ? row.capacity.trim() || null : null,
-        storageKind: typeof row.storageKind === "string" ? row.storageKind.trim() || null : null,
-        propertyTag: typeof row.propertyTag === "string" ? row.propertyTag.trim() || null : null,
-      },
-    }))
+    rows.map((row: Record<string, unknown>) => prisma.assetComponent.create({ data: componentData(asset.id, row) }))
   );
 
   await logActivity({ userId: req.user!.id, action: "components_added", entity: "Asset", entityId: asset.id, branchId: asset.branchId, metadata: { count: created.length } });
   res.status(201).json({ items: created });
+});
+
+// PUT /api/assets/:id/components
+// Replaces one group of rows in a single step, which is what the Edit form
+// needs: "hardware" is the device's own RAM/storage, "peripherals" is
+// everything attached to it. The other group is left untouched.
+router.put("/:id/components", requirePermission("edit_inventory"), async (req: AuthRequest, res: Response) => {
+  const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
+  if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
+
+  const kind = req.body?.kind;
+  if (kind !== "hardware" && kind !== "peripherals") { res.status(400).json({ error: "kind must be hardware or peripherals." }); return; }
+  const rows = Array.isArray(req.body?.components) ? req.body.components : null;
+  if (!rows || rows.length > 64) { res.status(400).json({ error: "Provide at most 64 component rows." }); return; }
+  const inGroup = (type: unknown) => typeof type === "string" && componentTypes.has(type) && hardwareTypes.has(type) === (kind === "hardware");
+  for (const row of rows) {
+    if (!row || typeof row !== "object" || !inGroup(row.type)) { res.status(400).json({ error: "Each component row needs a valid type." }); return; }
+  }
+
+  const items = await prisma.$transaction(async (tx) => {
+    await tx.assetComponent.deleteMany({ where: { assetId: asset.id, type: { in: [...componentTypes].filter(inGroup) as never } } });
+    const profile = kind === "hardware" ? await tx.deviceProfile.findUnique({ where: { assetId: asset.id }, select: { id: true } }) : null;
+    const created = [];
+    for (const row of rows as Record<string, unknown>[]) {
+      created.push(await tx.assetComponent.create({ data: { ...componentData(asset.id, row), deviceProfileId: profile?.id ?? null } }));
+    }
+    return created;
+  });
+
+  await logActivity({ userId: req.user!.id, action: "components_replaced", entity: "Asset", entityId: asset.id, branchId: asset.branchId, metadata: { kind, count: items.length } });
+  res.json({ items });
 });
 
 // PUT /api/assets/:id/device-profile
@@ -282,13 +320,19 @@ router.put("/:id/device-profile", requirePermission("edit_inventory"), async (re
   const asset = await prisma.asset.findUnique({ where: { id: req.params.id } });
   if (!asset) { res.status(404).json({ error: "Asset not found" }); return; }
 
-  const { brand, model, processor, motherboard } = req.body ?? {};
-  const data = {
-    brand: typeof brand === "string" ? brand.trim() || null : null,
-    model: typeof model === "string" ? model.trim() || null : null,
-    processor: typeof processor === "string" ? processor.trim() || null : null,
-    motherboard: typeof motherboard === "string" ? motherboard.trim() || null : null,
-  };
+  // Only the fields actually sent are written, so a caller that knows just
+  // brand and model does not blank out the processor or operating system.
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const data: Record<string, unknown> = {};
+  for (const key of ["brand", "model", "processor", "motherboard", "operatingSystem", "osVersion"]) {
+    if (body[key] !== undefined) data[key] = typeof body[key] === "string" ? (body[key] as string).trim() || null : null;
+  }
+  if (body.osInstallDate !== undefined) {
+    const installedOn = parseDateInput(body.osInstallDate);
+    if (installedOn === undefined) { res.status(400).json({ error: "OS install date must be a valid date." }); return; }
+    data.osInstallDate = installedOn;
+  }
+  if (body.deviceType === "computer" || body.deviceType === "laptop") data.deviceType = body.deviceType;
 
   const profile = await prisma.deviceProfile.upsert({
     where: { assetId: asset.id },

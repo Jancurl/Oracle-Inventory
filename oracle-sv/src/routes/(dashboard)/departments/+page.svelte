@@ -12,28 +12,22 @@
   import TableStates from '$lib/components/TableStates.svelte';
 
   type Branch = { id: string; name: string };
-  type Department = { id: string; name: string; archivedAt: string | null; createdAt: string; branch: Branch; _count: { employees: number }; employeesByBranch?: Record<string, number> };
+  type Department = { id: string; name: string; archivedAt: string | null; createdAt: string; branch: Branch; _count: { employees: number } };
   let departments = $state<Department[]>([]);
   let branches = $state<Branch[]>([]);
   let loading = $state(true); let error = $state(''); let search = $state(''); let currentPage = $state(1); let perPage = $state(10);
   let showCreate = $state(false); let busy = $state(false); let formError = $state('');
   let name = $state(''); let branchId = $state('');
   let filterBranch = $state('all');
-  // Employees are counted by their own branch: a department can still hold
-  // people from another branch, and those must not be lumped in.
-  function countIn(d: Department, branch: string) {
-    if (branch === 'all') return d._count.employees;
-    if (d.employeesByBranch) return d.employeesByBranch[branch] ?? 0;
-    return d.branch.id === branch ? d._count.employees : 0;
-  }
-  const inBranch = $derived(filterBranch === 'all' ? departments : departments.filter((d) => d.branch.id === filterBranch || countIn(d, filterBranch) > 0));
+  // A branch shows only its own departments, each with everyone assigned to it.
+  const inBranch = $derived(filterBranch === 'all' ? departments : departments.filter((d) => d.branch.id === filterBranch));
   const filtered = $derived(inBranch.filter((d) => d.name.toLowerCase().includes(search.toLowerCase())));
   const totalPages = $derived(Math.max(1, Math.ceil(filtered.length / perPage)));
   const paginated = $derived(filtered.slice((currentPage - 1) * perPage, currentPage * perPage));
   const activeCount = $derived(inBranch.filter((d) => !d.archivedAt).length);
-  const employeeCount = $derived(inBranch.reduce((sum, d) => sum + countIn(d, filterBranch), 0));
+  const employeeCount = $derived(inBranch.reduce((sum, d) => sum + d._count.employees, 0));
   const branchLabel = $derived(branches.find((b) => b.id === filterBranch)?.name ?? '');
-  function branchEmployees(id: string) { return departments.reduce((sum, d) => sum + countIn(d, id), 0); }
+  function branchEmployees(id: string) { return departments.filter((d) => d.branch.id === id).reduce((sum, d) => sum + d._count.employees, 0); }
 
   async function load() {
     loading = true; error = '';
@@ -93,7 +87,7 @@
               <td><button class="name-btn" onclick={() => goto('/departments/' + d.id)}>{d.name}</button></td>
               <td>{d.branch.name}</td>
               <td>{d.archivedAt ? 'Archived' : 'Active'}</td>
-              <td class="td-num">{countIn(d, filterBranch)}</td>
+              <td class="td-num">{d._count.employees}</td>
               <td onclick={(e) => e.stopPropagation()}>
                 <button class="icon-btn" title="View" onclick={() => goto('/departments/' + d.id)}>
                   <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>

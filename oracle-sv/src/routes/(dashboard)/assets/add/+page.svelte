@@ -6,6 +6,7 @@
   import { can } from '$lib/utils/permissions';
   import { authStore } from '$lib/stores/auth.svelte';
   import DatePicker from '$lib/components/date/DatePicker.svelte';
+  import { shrinkPhoto } from '$lib/utils/photo';
 
   interface Category { id: string; name: string; }
   interface Branch   { id: string; name: string; }
@@ -42,6 +43,7 @@
   interface PhotoEntry { id: string; preview: string; file: File; }
   let photos        = $state<PhotoEntry[]>([]);
   let lightboxPhoto = $state<string | null>(null);
+  let photoErr      = $state('');
 
   let submitting = $state(false);
   let submitErr  = $state('');
@@ -196,35 +198,49 @@
   });
 
   // ── Handlers ─────────────────────────────────────────────────────────────────
-  function handleAddPhotos(e: Event) {
+  function readPreview(file: File): Promise<string> {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(reader.result as string);
+      reader.onerror = () => reject(new Error(`"${file.name}" could not be read.`));
+      reader.readAsDataURL(file);
+    });
+  }
+
+  // Large photos are resized rather than rejected; a file that cannot be
+  // used is reported instead of silently dropped.
+  async function handleAddPhotos(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const files = Array.from(input.files ?? []);
-    for (const file of files) {
-      if (file.size > 5 * 1024 * 1024) continue;
-      const id = crypto.randomUUID();
-      const reader = new FileReader();
-      reader.onload = () => {
-        photos = [...photos, { id, preview: reader.result as string, file }];
-      };
-      reader.readAsDataURL(file);
-    }
     input.value = '';
+    photoErr = '';
+    for (const original of files) {
+      try {
+        const file = await shrinkPhoto(original);
+        photos = [...photos, { id: crypto.randomUUID(), preview: await readPreview(file), file }];
+      } catch (err) {
+        photoErr = (err as Error).message;
+      }
+    }
   }
 
   function removePhoto(id: string) {
     photos = photos.filter(p => p.id !== id);
   }
 
-  function replacePhoto(id: string, e: Event) {
+  async function replacePhoto(id: string, e: Event) {
     const input = e.currentTarget as HTMLInputElement;
-    const file  = input.files?.[0];
-    if (!file) return;
-    const reader = new FileReader();
-    reader.onload = () => {
-      photos = photos.map(p => p.id === id ? { ...p, preview: reader.result as string, file } : p);
-    };
-    reader.readAsDataURL(file);
+    const original = input.files?.[0];
     input.value = '';
+    if (!original) return;
+    photoErr = '';
+    try {
+      const file = await shrinkPhoto(original);
+      const preview = await readPreview(file);
+      photos = photos.map(p => p.id === id ? { ...p, preview, file } : p);
+    } catch (err) {
+      photoErr = (err as Error).message;
+    }
   }
 
   function handleCancel() {
@@ -721,7 +737,8 @@
               Upload Photos
             </label>
             <input id="asset-images" type="file" accept="image/jpeg,image/png,image/webp" multiple class="sr-only" onchange={handleAddPhotos} />
-            <p class="upload-hint">Max 5MB each<br />JPG, PNG, or WebP</p>
+            <p class="upload-hint">JPG, PNG, or WebP<br />Large photos are resized automatically</p>
+            {#if photoErr}<p class="upload-hint" style="color: var(--error);" role="alert">{photoErr}</p>{/if}
           </div>
 
           <!-- Right: form fields grid -->

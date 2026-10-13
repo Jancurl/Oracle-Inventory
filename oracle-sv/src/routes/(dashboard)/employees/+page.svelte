@@ -91,15 +91,12 @@
   let addErr  = $state('');
   let addForm = $state({ name: '', employeeId: '', position: '', branchId: '', departmentId: '', email: '', phone: '' });
 
-  // Departments belong to a branch, so once a branch is picked only its own are offered.
-  const addDepartments = $derived(
-    addForm.branchId ? departments.filter(d => d.branch?.id === addForm.branchId) : departments
-  );
-  const filterDepartments = $derived(
-    filterBranch === 'all' ? departments : departments.filter(d => d.branch?.id === filterBranch)
-  );
-  function deptLabel(d: Department, branchChosen: boolean) {
-    return branchChosen || !d.branch ? d.name : `${d.name} — ${d.branch.name}`;
+  // Every department is offered whichever branch is picked: employees are
+  // routinely placed in a department that belongs to another branch. Only the
+  // name is shown; the branch is added just when two departments share a name.
+  function deptLabel(d: Department) {
+    const shared = departments.some(other => other.id !== d.id && other.name === d.name);
+    return shared && d.branch ? `${d.name} — ${d.branch.name}` : d.name;
   }
 
   // ── Derived ───────────────────────────────────────────────────────────────
@@ -205,7 +202,7 @@
     </div>
     <div class="field">
       <label class="field-label">Branch</label>
-      <select class="field-input" bind:value={addForm.branchId} onchange={() => (addForm.departmentId = '')}>
+      <select class="field-input" bind:value={addForm.branchId}>
         <option value="">— Select branch —</option>
         {#each branches as b}<option value={b.id}>{b.name}</option>{/each}
       </select>
@@ -214,7 +211,7 @@
       <label class="field-label">Department</label>
       <select class="field-input" bind:value={addForm.departmentId}>
         <option value="">— Select department —</option>
-        {#each addDepartments as d}<option value={d.id}>{deptLabel(d, !!addForm.branchId)}</option>{/each}
+        {#each departments as d}<option value={d.id}>{deptLabel(d)}</option>{/each}
       </select>
     </div>
     <div class="field">
@@ -316,13 +313,13 @@
         <option value="zoho">Zoho Directory</option>
         <option value="manual">Manual</option>
       </select>
-      <select class="filter-select" bind:value={filterBranch} onchange={() => { filterDept = 'all'; resetPage(); }}>
+      <select class="filter-select" bind:value={filterBranch} onchange={resetPage}>
         <option value="all">All Branches</option>
         {#each branches as b}<option value={b.id}>{b.name}</option>{/each}
       </select>
       <select class="filter-select" bind:value={filterDept} onchange={resetPage}>
         <option value="all">All Departments</option>
-        {#each filterDepartments as d}<option value={d.id}>{deptLabel(d, filterBranch !== 'all')}</option>{/each}
+        {#each departments as d}<option value={d.id}>{deptLabel(d)}</option>{/each}
       </select>
     </div>
 

@@ -70,6 +70,33 @@ router.post("/cameras", requirePermission("manage_infrastructure_assets"), async
   try { const item = await prisma.$transaction(async (tx) => { const created = await tx.cameraProfile.create({ data }); await tx.activityLog.create({ data: { userId: req.user!.id, action: "cctv_camera_created", entity: "CameraProfile", entityId: created.id, metadata: { source: "cctv_manual", actorId: req.user!.id, assetId, branchId: s.asset!.branchId } } }); return created; }); broadcastChange({ entity: "CameraProfile", action: "cctv_camera_created", entityId: item.id, branchId: s.asset!.branchId }); res.status(201).json(item); } catch { res.status(409).json({ error: "A camera profile already exists for this asset.", code: "DUPLICATE_CAMERA_PROFILE" }); }
 });
 
+// Edit an existing camera profile (the Edit Asset form). Creating one stays with POST /cameras.
+router.put("/cameras/:assetId", requirePermission("manage_infrastructure_assets"), async (req: AuthRequest, res) => {
+  const b = req.body as Record<string, unknown>; const allowed = ["physicalLocation", "coverageArea", "cameraType", "resolution", "nightVision", "motionDetection", "installationDate", "notes"];
+  const bad = unknown(b, allowed); const secret = rejectSecrets(b); if (bad.length || secret) return res.status(400).json({ error: secret ? "Sensitive or credential-like values are not accepted." : "Unknown fields are not accepted.", code: "INVALID_CCTV_PAYLOAD", fieldErrors: bad });
+  const s = await scopeAsset(req, req.params.assetId); if (!s.asset) return res.status(404).json({ error: "Asset not found." }); if (!s.allowed) return res.status(403).json({ error: "Asset is outside your branch scope." });
+  const existing = await prisma.cameraProfile.findUnique({ where: { assetId: req.params.assetId } }); if (!existing) return res.status(404).json({ error: "This asset has no camera profile yet." });
+  const location = typeof b.physicalLocation === "string" ? b.physicalLocation.trim() : existing.physicalLocation; if (!location) return res.status(400).json({ error: "physicalLocation is required.", fieldErrors: ["physicalLocation"] });
+  const installed = b.installationDate === undefined ? existing.installationDate : typeof b.installationDate === "string" && b.installationDate ? new Date(b.installationDate) : null; if (installed && Number.isNaN(installed.getTime())) return res.status(400).json({ error: "installationDate must be a valid date.", fieldErrors: ["installationDate"] });
+  const text = (key: string, current: string | null) => b[key] === undefined ? current : typeof b[key] === "string" ? (b[key] as string).trim() || null : null;
+  const flag = (key: string, current: boolean | null) => b[key] === undefined ? current : typeof b[key] === "boolean" ? (b[key] as boolean) : null;
+  const item = await prisma.cameraProfile.update({ where: { id: existing.id }, data: { physicalLocation: location, coverageArea: text("coverageArea", existing.coverageArea), cameraType: (b.cameraType as never) ?? existing.cameraType, resolution: text("resolution", existing.resolution), nightVision: flag("nightVision", existing.nightVision), motionDetection: flag("motionDetection", existing.motionDetection), installationDate: installed, notes: text("notes", existing.notes) } });
+  await audit(req, "cctv_camera_updated", "CameraProfile", item.id, { assetId: item.assetId, branchId: s.asset.branchId });
+  res.json(item);
+});
+
+// Edit an existing recorder profile. Channel capacity and channels are not changed here.
+router.put("/recorders/:assetId", requirePermission("manage_infrastructure_assets"), async (req: AuthRequest, res) => {
+  const b = req.body as Record<string, unknown>; const allowed = ["recorderType", "physicalLocation", "storageCapacityBytes", "retentionDaysTarget", "notes"];
+  const bad = unknown(b, allowed); const secret = rejectSecrets(b); if (bad.length || secret) return res.status(400).json({ error: secret ? "Sensitive or credential-like values are not accepted." : "Unknown fields are not accepted.", code: "INVALID_CCTV_PAYLOAD", fieldErrors: bad });
+  const s = await scopeAsset(req, req.params.assetId); if (!s.asset) return res.status(404).json({ error: "Asset not found." }); if (!s.allowed) return res.status(403).json({ error: "Asset is outside your branch scope." });
+  const existing = await prisma.recorderProfile.findUnique({ where: { assetId: req.params.assetId } }); if (!existing) return res.status(404).json({ error: "This asset has no recorder profile yet." });
+  const location = typeof b.physicalLocation === "string" ? b.physicalLocation.trim() : existing.physicalLocation; if (!location) return res.status(400).json({ error: "physicalLocation is required.", fieldErrors: ["physicalLocation"] });
+  const item = await prisma.recorderProfile.update({ where: { id: existing.id }, data: { physicalLocation: location, recorderType: (b.recorderType as never) ?? existing.recorderType, storageCapacityBytes: b.storageCapacityBytes === undefined ? existing.storageCapacityBytes : typeof b.storageCapacityBytes === "number" ? BigInt(Math.round(b.storageCapacityBytes)) : null, retentionDaysTarget: b.retentionDaysTarget === undefined ? existing.retentionDaysTarget : Number.isInteger(b.retentionDaysTarget) ? Number(b.retentionDaysTarget) : null, notes: b.notes === undefined ? existing.notes : typeof b.notes === "string" ? b.notes.trim() || null : null } });
+  await audit(req, "cctv_recorder_updated", "RecorderProfile", item.id, { assetId: item.assetId, branchId: s.asset.branchId });
+  res.json(safeJson(item));
+});
+
 router.post("/recorders", requirePermission("manage_infrastructure_assets"), async (req: AuthRequest, res) => {
   const b = req.body as Record<string, unknown>; const allowed = ["assetId", "recorderType", "channelCapacity", "physicalLocation", "storageCapacityBytes", "retentionDaysTarget", "notes", "channels"];
   const bad = unknown(b, allowed); const secret = rejectSecrets(b); if (bad.length || secret) return res.status(400).json({ error: secret ? "Sensitive or credential-like values are not accepted." : "Unknown fields are not accepted.", code: "INVALID_CCTV_PAYLOAD", fieldErrors: bad });

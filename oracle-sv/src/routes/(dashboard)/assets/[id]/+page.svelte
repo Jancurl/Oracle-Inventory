@@ -6,6 +6,7 @@
   import { api } from '$lib/api';
   import { authStore } from '$lib/stores/auth.svelte';
   import { can } from '$lib/utils/permissions';
+  import { shrinkPhoto } from '$lib/utils/photo';
 
   // ── API types ─────────────────────────────────────────────────────────────
   interface ApiAsset {
@@ -64,6 +65,62 @@
   let showEdit   = $state(false);
   let editSaving = $state(false);
   let editErr    = $state('');
+
+  // Category-specific details in the Edit form. Which block shows follows the
+  // category chosen in the form, the same way the Add Asset form does.
+  type HardwareRow   = { type: 'ram' | 'storage'; slotOrBay: string; brand: string; model: string; serialNumber: string; capacity: string };
+  type PeripheralRow = { type: string; brand: string; model: string; serialNumber: string; propertyTag: string };
+  const PERIPHERAL_TYPES = [
+    { value: 'monitor', label: 'Monitor' }, { value: 'keyboard', label: 'Keyboard' }, { value: 'mouse', label: 'Mouse' },
+    { value: 'speaker', label: 'Speaker' }, { value: 'webcam', label: 'Webcam' }, { value: 'microphone', label: 'Microphone' },
+    { value: 'printer', label: 'Printer' }, { value: 'ups', label: 'UPS' }, { value: 'avr', label: 'AVR' },
+    { value: 'clicker', label: 'Clicker' }, { value: 'projector', label: 'Projector' }, { value: 'tv', label: 'TV' },
+    { value: 'signal_booster', label: 'Signal Booster' }, { value: 'flash_drive', label: 'Flash Drive' },
+    { value: 'external_hdd', label: 'External HDD' },
+    { value: 'hdd_ssd_docking_station', label: 'HDD/SSD Docking Station' },
+    { value: 'nvme_docking_station', label: 'NVME/SSD Docking Station' },
+  ];
+  let editSpecs = $state({ computerName: '', brand: '', model: '', processor: '', motherboard: '', operatingSystem: '', osVersion: '', osInstallDate: '', imeiNumber: '', propertyTag: '' });
+  let editHardware    = $state<HardwareRow[]>([]);
+  let editPeripherals = $state<PeripheralRow[]>([]);
+  let editCamera   = $state({ physicalLocation: '', coverageArea: '', cameraType: 'fixed', resolution: '', installationDate: '', nightVision: false, motionDetection: false, notes: '' });
+  let editRecorder = $state({ physicalLocation: '', channelCapacity: '', recorderType: 'nvr', storageGb: '', retentionDays: '', notes: '' });
+  // Photos marked here are only deleted when the form is saved, so Cancel keeps them.
+  let editRemovedPhotos = $state(new Set<string>());
+  function togglePhotoRemoval(id: string) {
+    const next = new Set(editRemovedPhotos);
+    if (next.has(id)) next.delete(id); else next.add(id);
+    editRemovedPhotos = next;
+  }
+  // Photos picked in the form are likewise only uploaded on Save.
+  let editNewPhotos = $state<{ id: string; file: File; preview: string }[]>([]);
+  let editPhotoErr  = $state('');
+  async function stagePhotos(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    editPhotoErr = '';
+    for (const original of files) {
+      try {
+        const file = await shrinkPhoto(original);
+        editNewPhotos = [...editNewPhotos, { id: crypto.randomUUID(), file, preview: URL.createObjectURL(file) }];
+      } catch (err) {
+        editPhotoErr = (err as Error).message;
+      }
+    }
+  }
+  function clearStagedPhotos(only?: string) {
+    for (const photo of editNewPhotos) if (!only || photo.id === only) URL.revokeObjectURL(photo.preview);
+    editNewPhotos = only ? editNewPhotos.filter(photo => photo.id !== only) : [];
+  }
+
+  const editCategoryName = $derived(cats.find(c => c.id === editForm.categoryId)?.name ?? '');
+  const editIsComputer   = $derived(/desktop|laptop|computer/i.test(editCategoryName));
+  const editIsPhone      = $derived(/phone/i.test(editCategoryName));
+  const editIsCamera     = $derived(/camera|cctv/i.test(editCategoryName));
+  const editIsRecorder   = $derived(/nvr|dvr|recorder/i.test(editCategoryName));
+  // The category itself is a peripheral (Monitor, Printer, …): the asset IS that item.
+  const editIsPeripheral = $derived(PERIPHERAL_TYPES.some(t => editCategoryName.toLowerCase().includes(t.label.toLowerCase())));
   let editForm   = $state({ name: '', serialNumber: '', categoryId: '', branchId: '', condition: 'usable', ownership: 'company', description: '', warrantyExpiry: '', purchaseDate: '', vendor: '', internalNotes: '' });
 
   // Delete confirm
@@ -207,6 +264,36 @@
     const photo = photoAttachments[photoIndex];
     if (photo) void loadPhoto(photo.id);
   });
+  async function uploadPhoto(file: File) {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await api.raw(`/api/assets/${$page.params.id}/attachments`, { method: 'POST', body: form });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({})) as { error?: string };
+      throw new Error(body.error ?? `Upload failed (HTTP ${res.status}).`);
+    }
+  }
+
+  let photoUploading = $state(false);
+  let photoErr       = $state('');
+  async function addPhotos(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    if (files.length === 0) return;
+    photoUploading = true; photoErr = '';
+    try {
+      for (const original of files) await uploadPhoto(await shrinkPhoto(original));
+    } catch (err) {
+      photoErr = (err as Error).message;
+    } finally {
+      await loadAttachments();
+      // Attachments come back newest first, so the photo just added is the first one.
+      photoIndex = 0;
+      photoUploading = false;
+    }
+  }
+
   function stepPhoto(delta: number) {
     if (photoAttachments.length < 2) return;
     photoIndex = (photoIndex + delta + photoAttachments.length) % photoAttachments.length;
@@ -331,15 +418,54 @@
       vendor: metaText('vendor'),
       internalNotes: metaText('internalNotes'),
     };
+    const profile = asset.deviceProfile;
+    editSpecs = {
+      computerName: asset.computerName ?? '',
+      brand: profile?.brand ?? '', model: profile?.model ?? '',
+      processor: profile?.processor ?? '', motherboard: profile?.motherboard ?? '',
+      operatingSystem: profile?.operatingSystem ?? '', osVersion: profile?.osVersion ?? '',
+      osInstallDate: profile?.osInstallDate ? profile.osInstallDate.slice(0, 10) : '',
+      imeiNumber: asset.imeiNumber ?? '', propertyTag: asset.propertyTag ?? '',
+    };
+    editHardware = hardwareParts.map(c => ({ type: c.type as 'ram' | 'storage', slotOrBay: c.slotOrBay ?? '', brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', capacity: c.capacity ?? '' }));
+    editPeripherals = peripheralParts.map(c => ({ type: c.type, brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', propertyTag: c.propertyTag ?? '' }));
+    editCamera = {
+      physicalLocation: cameraInfo?.physicalLocation ?? '', coverageArea: cameraInfo?.coverageArea ?? '',
+      cameraType: cameraInfo?.cameraType ?? 'fixed', resolution: cameraInfo?.resolution ?? '',
+      installationDate: cameraInfo?.installationDate ? cameraInfo.installationDate.slice(0, 10) : '',
+      nightVision: cameraInfo?.nightVision ?? false, motionDetection: cameraInfo?.motionDetection ?? false, notes: cameraInfo?.notes ?? '',
+    };
+    const recorder = recorders.find(r => r.assetId === assetId);
+    editRecorder = {
+      physicalLocation: recorder?.physicalLocation ?? '', channelCapacity: recorder ? String(recorder.channelCapacity) : '',
+      recorderType: recorder?.recorderType ?? 'nvr',
+      storageGb: recorder?.storageCapacityBytes ? String(Math.round(Number(recorder.storageCapacityBytes) / 1_000_000_000)) : '',
+      retentionDays: recorder?.retentionDaysTarget != null ? String(recorder.retentionDaysTarget) : '', notes: recorder?.notes ?? '',
+    };
+    editRemovedPhotos = new Set();
+    clearStagedPhotos();
+    editPhotoErr = '';
+    for (const photo of photoAttachments) void loadPhoto(photo.id);
     editErr = '';
     showEdit = true;
   }
 
   async function saveEdit() {
+    if (!asset) return;
     if (!editForm.name.trim()) { editErr = 'Asset name is required.'; return; }
+    const canInfra = can('manage_infrastructure_assets');
+    const recorder = recorders.find(r => r.assetId === assetId);
+    const saveCamera   = editIsCamera && canInfra && (!!cameraInfo || !!editCamera.physicalLocation.trim());
+    const saveRecorder = editIsRecorder && canInfra && (!!recorder || !!editRecorder.physicalLocation.trim());
+    if (saveCamera && !editCamera.physicalLocation.trim()) { editErr = 'Physical location is required for a camera.'; return; }
+    if (saveRecorder && !editRecorder.physicalLocation.trim()) { editErr = 'Physical location is required for a recorder.'; return; }
+    const capacity = Number(editRecorder.channelCapacity);
+    if (saveRecorder && !recorder && (!Number.isInteger(capacity) || capacity < 1)) { editErr = 'Channel capacity must be a whole number of at least 1.'; return; }
+
     editSaving = true; editErr = '';
+    const text = (value: unknown) => String(value ?? '').trim();
     try {
-      asset = await api.put<ApiAsset>(`/api/assets/${assetId}`, {
+      await api.put<ApiAsset>(`/api/assets/${assetId}`, {
         name: editForm.name.trim(),
         serialNumber: editForm.serialNumber.trim() || null,
         categoryId: editForm.categoryId || null,
@@ -351,9 +477,74 @@
         purchaseDate: editForm.purchaseDate || null,
         vendor: editForm.vendor.trim() || null,
         internalNotes: editForm.internalNotes.trim() || null,
+        ...(editIsComputer ? { computerName: text(editSpecs.computerName) || null } : {}),
+        ...(editIsPhone ? { imeiNumber: text(editSpecs.imeiNumber) || null } : {}),
+        ...(editIsPhone || editIsPeripheral ? { propertyTag: text(editSpecs.propertyTag) || null } : {}),
       });
+
+      // Brand and model apply to every category; the rest belongs to computers.
+      const profile: Record<string, string | null> = { brand: text(editSpecs.brand) || null, model: text(editSpecs.model) || null };
+      if (editIsComputer) {
+        Object.assign(profile, {
+          processor: text(editSpecs.processor) || null, motherboard: text(editSpecs.motherboard) || null,
+          operatingSystem: text(editSpecs.operatingSystem) || null, osVersion: text(editSpecs.osVersion) || null,
+          osInstallDate: editSpecs.osInstallDate || null,
+          deviceType: /laptop/i.test(editCategoryName) ? 'laptop' : 'computer',
+        });
+      }
+      if (asset.deviceProfile || Object.entries(profile).some(([key, value]) => key !== 'deviceType' && value)) {
+        await api.put(`/api/assets/${assetId}/device-profile`, profile);
+      }
+
+      if (editIsComputer) {
+        await api.put(`/api/assets/${assetId}/components`, { kind: 'hardware', components: editHardware.map(r => ({ ...r, capacity: text(r.capacity) })) });
+      } else if (!editIsPeripheral) {
+        await api.put(`/api/assets/${assetId}/components`, { kind: 'peripherals', components: editPeripherals });
+      }
+
+      if (saveCamera) {
+        const body = {
+          physicalLocation: editCamera.physicalLocation.trim(), coverageArea: editCamera.coverageArea.trim(),
+          cameraType: editCamera.cameraType, resolution: editCamera.resolution.trim(),
+          nightVision: editCamera.nightVision, motionDetection: editCamera.motionDetection,
+          installationDate: editCamera.installationDate, notes: editCamera.notes.trim(),
+        };
+        if (cameraInfo) await api.put(`/api/cctv/cameras/${assetId}`, body);
+        else await api.post('/api/cctv/cameras', { assetId, ...body, installationDate: body.installationDate || undefined }, { 'Idempotency-Key': `camera-${assetId}-${Date.now()}` });
+      }
+      if (saveRecorder) {
+        const body = {
+          recorderType: editRecorder.recorderType, physicalLocation: editRecorder.physicalLocation.trim(),
+          storageCapacityBytes: text(editRecorder.storageGb) ? Number(editRecorder.storageGb) * 1_000_000_000 : null,
+          retentionDaysTarget: text(editRecorder.retentionDays) ? Number(editRecorder.retentionDays) : null,
+          notes: editRecorder.notes.trim(),
+        };
+        if (recorder) await api.put(`/api/cctv/recorders/${assetId}`, body);
+        else await api.post('/api/cctv/recorders', { assetId, channelCapacity: capacity, ...body, storageCapacityBytes: body.storageCapacityBytes ?? undefined, retentionDaysTarget: body.retentionDaysTarget ?? undefined }, { 'Idempotency-Key': `recorder-${assetId}-${Date.now()}` });
+      }
+
+      if (editRemovedPhotos.size > 0 || editNewPhotos.length > 0) {
+        for (const id of editRemovedPhotos) await api.delete(`/api/assets/attachments/${id}`);
+        editRemovedPhotos = new Set();
+        // One at a time, dropping each from the list once it is up, so a
+        // failure part-way does not upload the earlier ones again on retry.
+        while (editNewPhotos.length > 0) {
+          await uploadPhoto(editNewPhotos[0].file);
+          clearStagedPhotos(editNewPhotos[0].id);
+        }
+        await loadAttachments();
+        photoIndex = 0;
+      }
+
+      asset = await api.get<ApiAsset>(`/api/assets/${assetId}`);
+      void loadInfra();
       showEdit = false;
-    } catch (e) { editErr = (e as Error).message; }
+    } catch (e) {
+      editErr = (e as Error).message;
+      // The first steps may already be saved; show what the asset looks like now.
+      asset = await api.get<ApiAsset>(`/api/assets/${assetId}`).catch(() => asset);
+      await loadAttachments();
+    }
     finally { editSaving = false; }
   }
 
@@ -448,9 +639,9 @@
   const isNetworkAsset  = $derived(/access.?point|\bap\b|switch/i.test(asset?.category?.name ?? '') || (SERVER_SPECS_ENABLED && /firewall|server/i.test(asset?.category?.name ?? '')));
   const isServerAsset   = $derived(SERVER_SPECS_ENABLED && /server/i.test(asset?.category?.name ?? ''));
 
-  interface CameraInfo { id: string; asset: { id: string }; physicalLocation: string; cameraType: string; resolution: string | null; nightVision: boolean | null; motionDetection: boolean | null; assignments: { channel: { channelNumber: number; recorder: { assetId: string; physicalLocation: string } } }[]; }
+  interface CameraInfo { id: string; asset: { id: string }; physicalLocation: string; cameraType: string; resolution: string | null; nightVision: boolean | null; motionDetection: boolean | null; coverageArea?: string | null; installationDate?: string | null; notes?: string | null; assignments: { channel: { channelNumber: number; recorder: { assetId: string; physicalLocation: string } } }[]; }
   interface RecorderChannel { id: string; channelNumber: number; enabled: boolean; assignments: { camera: { asset: { id: string; name: string } } }[]; }
-  interface RecorderInfo { id: string; assetId: string; physicalLocation: string; channelCapacity: number; channels: RecorderChannel[]; asset: { name: string }; }
+  interface RecorderInfo { id: string; assetId: string; physicalLocation: string; channelCapacity: number; recorderType?: string; storageCapacityBytes?: string | number | null; retentionDaysTarget?: number | null; notes?: string | null; channels: RecorderChannel[]; asset: { name: string }; }
   interface NetIface { id: string; interfaceName: string; macAddress: string | null; }
   interface IpObs { address: string; prefixLength: number; addressingMode: string; observedAt: string; }
   interface ServerEntry { asset: { id: string }; environment: string; criticality: string; virtualizationRole: string; roles: { id: string; roleType: string; roleName: string | null; isPrimary: boolean; validFrom: string; validTo: string | null }[]; }
@@ -649,6 +840,16 @@
             <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
           </button>
         </div>
+
+        {#if can('edit_inventory')}
+          <div class="photo-add">
+            <label class="btn-sm photo-add-btn" class:photo-add-busy={photoUploading} for="asset-photo-input">
+              {photoUploading ? 'Uploading…' : 'Add photo'}
+            </label>
+            <input id="asset-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple class="photo-add-input" disabled={photoUploading} onchange={addPhotos} />
+            {#if photoErr}<span class="photo-add-err" role="alert">{photoErr}</span>{/if}
+          </div>
+        {/if}
 
         <!-- Asset code section -->
         <div class="asset-code">
@@ -1064,7 +1265,7 @@
   <!-- ── Edit modal ──────────────────────────────────────────────────────── -->
   {#if showEdit}
     <div class="modal-overlay" onclick={() => showEdit = false} role="presentation">
-      <div class="modal" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Edit asset">
+      <div class="modal modal-wide" onclick={(e) => e.stopPropagation()} role="dialog" aria-modal="true" aria-label="Edit asset">
         <div class="modal-head">
           <span class="modal-title">Edit asset</span>
           <button class="modal-close" onclick={() => showEdit = false} aria-label="Close">
@@ -1123,6 +1324,139 @@
               <input id="e-purchase" class="form-input" type="date" bind:value={editForm.purchaseDate} />
             </div>
           </div>
+          <div class="form-row">
+            <span class="form-label">Photos</span>
+            <div class="edit-photos">
+              {#each photoAttachments as photo (photo.id)}
+                {@const removed = editRemovedPhotos.has(photo.id)}
+                <div class="edit-photo" class:edit-photo-removed={removed}>
+                  {#if photoUrls[photo.id]}
+                    <img src={photoUrls[photo.id]} alt={photo.fileName} />
+                  {:else}
+                    <span class="edit-photo-loading">Loading…</span>
+                  {/if}
+                  <button type="button" class="edit-photo-btn" onclick={() => togglePhotoRemoval(photo.id)}>{removed ? 'Undo' : 'Delete'}</button>
+                </div>
+              {/each}
+              {#each editNewPhotos as photo (photo.id)}
+                <div class="edit-photo edit-photo-new">
+                  <img src={photo.preview} alt={photo.file.name} />
+                  <span class="edit-photo-tag">New</span>
+                  <button type="button" class="edit-photo-btn" onclick={() => clearStagedPhotos(photo.id)}>Remove</button>
+                </div>
+              {/each}
+              <label class="edit-photo edit-photo-add" for="e-photo-input">+ Add photo</label>
+              <input id="e-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple class="photo-add-input" onchange={stagePhotos} />
+            </div>
+            {#if editPhotoErr}<span class="edit-photo-hint" role="alert">{editPhotoErr}</span>{/if}
+            {#if editRemovedPhotos.size > 0 || editNewPhotos.length > 0}
+              <span class="edit-photo-note">
+                {[editNewPhotos.length > 0 ? `${editNewPhotos.length} to add` : '', editRemovedPhotos.size > 0 ? `${editRemovedPhotos.size} to delete` : ''].filter(Boolean).join(', ')} — applied when you save.
+              </span>
+            {/if}
+          </div>
+          {#if editIsComputer}
+            <div class="form-section">
+              <h3 class="form-section-title">Computer / Laptop Specs</h3>
+              <div class="form-2col">
+                <div class="form-row"><label class="form-label" for="e-netname">Computer Name</label><input id="e-netname" class="form-input" type="text" bind:value={editSpecs.computerName} placeholder="e.g. Finance-LT-014" /></div>
+                <div class="form-row"><label class="form-label" for="e-brand">Brand</label><input id="e-brand" class="form-input" type="text" bind:value={editSpecs.brand} /></div>
+                <div class="form-row"><label class="form-label" for="e-model">Model</label><input id="e-model" class="form-input" type="text" bind:value={editSpecs.model} /></div>
+                <div class="form-row"><label class="form-label" for="e-cpu">Processor</label><input id="e-cpu" class="form-input" type="text" bind:value={editSpecs.processor} /></div>
+                <div class="form-row"><label class="form-label" for="e-mobo">Motherboard</label><input id="e-mobo" class="form-input" type="text" bind:value={editSpecs.motherboard} /></div>
+                <div class="form-row"><label class="form-label" for="e-os">Operating System</label><input id="e-os" class="form-input" type="text" bind:value={editSpecs.operatingSystem} /></div>
+                <div class="form-row"><label class="form-label" for="e-osver">OS Version</label><input id="e-osver" class="form-input" type="text" bind:value={editSpecs.osVersion} /></div>
+                <div class="form-row"><label class="form-label" for="e-osdate">OS Install Date</label><input id="e-osdate" class="form-input" type="date" bind:value={editSpecs.osInstallDate} /></div>
+              </div>
+              <div class="form-section-head">
+                <span class="form-label">RAM and Storage</span>
+                <span class="form-section-actions">
+                  <button type="button" class="btn-sm" onclick={() => (editHardware = [...editHardware, { type: 'ram', slotOrBay: '', brand: '', model: '', serialNumber: '', capacity: '' }])}>+ RAM row</button>
+                  <button type="button" class="btn-sm" onclick={() => (editHardware = [...editHardware, { type: 'storage', slotOrBay: '', brand: '', model: '', serialNumber: '', capacity: '' }])}>+ Storage row</button>
+                </span>
+              </div>
+              {#each editHardware as row, index}
+                <div class="spec-row spec-row-hardware">
+                  <span class="spec-row-type">{row.type === 'ram' ? 'RAM' : 'Storage'}</span>
+                  <input class="form-input" aria-label="Slot or bay" bind:value={row.slotOrBay} placeholder="Slot / bay" />
+                  <input class="form-input" aria-label="Brand" bind:value={row.brand} placeholder="Brand" />
+                  <input class="form-input" aria-label="Model" bind:value={row.model} placeholder="Model" />
+                  <input class="form-input" aria-label="Serial number" bind:value={row.serialNumber} placeholder="Serial" />
+                  <input class="form-input" aria-label="Capacity" bind:value={row.capacity} placeholder="Capacity (GB)" />
+                  <button type="button" class="spec-row-remove" aria-label="Remove row" onclick={() => (editHardware = editHardware.filter((_, i) => i !== index))}>×</button>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="form-section">
+              <h3 class="form-section-title">{editIsPhone ? 'Phone Specs' : editIsCamera ? 'Camera Specs' : editIsRecorder ? 'Recorder Specs' : 'Specs'}</h3>
+              <div class="form-2col">
+                <div class="form-row"><label class="form-label" for="e-brand">Brand</label><input id="e-brand" class="form-input" type="text" bind:value={editSpecs.brand} /></div>
+                <div class="form-row"><label class="form-label" for="e-model">Model</label><input id="e-model" class="form-input" type="text" bind:value={editSpecs.model} /></div>
+                {#if editIsPhone}
+                  <div class="form-row"><label class="form-label" for="e-imei">IMEI</label><input id="e-imei" class="form-input" type="text" bind:value={editSpecs.imeiNumber} /></div>
+                {/if}
+                {#if editIsPhone || editIsPeripheral}
+                  <div class="form-row"><label class="form-label" for="e-ptag">Property Tag</label><input id="e-ptag" class="form-input" type="text" bind:value={editSpecs.propertyTag} /></div>
+                {/if}
+              </div>
+
+              {#if editIsCamera && can('manage_infrastructure_assets')}
+                <div class="form-2col">
+                  <div class="form-row"><label class="form-label" for="e-cam-location">Physical Location *</label><input id="e-cam-location" class="form-input" type="text" bind:value={editCamera.physicalLocation} placeholder="e.g. Entrance, Cubao branch" /></div>
+                  <div class="form-row"><label class="form-label" for="e-cam-coverage">Coverage Area</label><input id="e-cam-coverage" class="form-input" type="text" bind:value={editCamera.coverageArea} /></div>
+                  <div class="form-row"><label class="form-label" for="e-cam-type">Camera Type</label>
+                    <select id="e-cam-type" class="form-select" bind:value={editCamera.cameraType}>
+                      <option value="fixed">Fixed</option><option value="dome">Dome</option><option value="bullet">Bullet</option>
+                      <option value="ptz">PTZ</option><option value="thermal">Thermal</option><option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div class="form-row"><label class="form-label" for="e-cam-resolution">Resolution</label><input id="e-cam-resolution" class="form-input" type="text" bind:value={editCamera.resolution} placeholder="e.g. 4MP" /></div>
+                  <div class="form-row"><label class="form-label" for="e-cam-installed">Installation Date</label><input id="e-cam-installed" class="form-input" type="date" bind:value={editCamera.installationDate} /></div>
+                  <div class="form-row form-checks">
+                    <label><input type="checkbox" bind:checked={editCamera.nightVision} /> Night vision</label>
+                    <label><input type="checkbox" bind:checked={editCamera.motionDetection} /> Motion detection</label>
+                  </div>
+                </div>
+                <div class="form-row"><label class="form-label" for="e-cam-notes">Camera Notes</label><textarea id="e-cam-notes" class="form-ta" rows="2" bind:value={editCamera.notes}></textarea></div>
+              {/if}
+
+              {#if editIsRecorder && can('manage_infrastructure_assets')}
+                {@const hasRecorder = recorders.some(r => r.assetId === assetId)}
+                <div class="form-2col">
+                  <div class="form-row"><label class="form-label" for="e-rec-location">Physical Location *</label><input id="e-rec-location" class="form-input" type="text" bind:value={editRecorder.physicalLocation} placeholder="e.g. Server room, Cubao branch" /></div>
+                  <div class="form-row"><label class="form-label" for="e-rec-capacity">Channel Capacity{hasRecorder ? '' : ' *'}</label><input id="e-rec-capacity" class="form-input" type="number" min="1" bind:value={editRecorder.channelCapacity} disabled={hasRecorder} title={hasRecorder ? 'Channel capacity cannot be changed after the recorder is set up.' : ''} /></div>
+                  <div class="form-row"><label class="form-label" for="e-rec-type">Recorder Type</label>
+                    <select id="e-rec-type" class="form-select" bind:value={editRecorder.recorderType}>
+                      <option value="nvr">NVR</option><option value="dvr">DVR</option><option value="hybrid">Hybrid</option><option value="other">Other</option>
+                    </select>
+                  </div>
+                  <div class="form-row"><label class="form-label" for="e-rec-storage">Storage Capacity (GB)</label><input id="e-rec-storage" class="form-input" type="number" min="0" bind:value={editRecorder.storageGb} /></div>
+                  <div class="form-row"><label class="form-label" for="e-rec-retention">Retention Days</label><input id="e-rec-retention" class="form-input" type="number" min="0" bind:value={editRecorder.retentionDays} /></div>
+                </div>
+                <div class="form-row"><label class="form-label" for="e-rec-notes">Recorder Notes</label><textarea id="e-rec-notes" class="form-ta" rows="2" bind:value={editRecorder.notes}></textarea></div>
+              {/if}
+
+              {#if !editIsPeripheral}
+                <div class="form-section-head">
+                  <span class="form-label">Peripherals</span>
+                  <button type="button" class="btn-sm" onclick={() => (editPeripherals = [...editPeripherals, { type: 'monitor', brand: '', model: '', serialNumber: '', propertyTag: '' }])}>+ Add peripheral</button>
+                </div>
+                {#each editPeripherals as row, index}
+                  <div class="spec-row spec-row-peripheral">
+                    <select class="form-select" aria-label="Peripheral type" bind:value={row.type}>
+                      {#each PERIPHERAL_TYPES as opt}<option value={opt.value}>{opt.label}</option>{/each}
+                    </select>
+                    <input class="form-input" aria-label="Brand" bind:value={row.brand} placeholder="Brand" />
+                    <input class="form-input" aria-label="Model" bind:value={row.model} placeholder="Model" />
+                    <input class="form-input" aria-label="Serial number" bind:value={row.serialNumber} placeholder="Serial" />
+                    <input class="form-input" aria-label="Property tag" bind:value={row.propertyTag} placeholder="Property tag" />
+                    <button type="button" class="spec-row-remove" aria-label="Remove row" onclick={() => (editPeripherals = editPeripherals.filter((_, i) => i !== index))}>×</button>
+                  </div>
+                {/each}
+              {/if}
+            </div>
+          {/if}
           <div class="form-row">
             <label class="form-label" for="e-vendor">Vendor / Supplier</label>
             <input id="e-vendor" class="form-input" type="text" bind:value={editForm.vendor} placeholder="e.g. Dell Technologies" />
@@ -1573,6 +1907,12 @@
 
   .img-icon { flex-shrink: 0; }
   .img-photo { max-width: 100%; max-height: 320px; object-fit: contain; border-radius: var(--r-md); }
+  .photo-add { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--hairline); background: var(--canvas); }
+  .photo-add-btn { cursor: pointer; border: 1px solid var(--hairline); background: var(--canvas); color: var(--body); }
+  .photo-add-btn:hover { background: var(--canvas-soft-2); }
+  .photo-add-busy { opacity: 0.6; pointer-events: none; }
+  .photo-add-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .photo-add-err { font-size: 12px; color: var(--error); text-align: center; }
 
   .img-label {
     font-size: 11px;
@@ -1866,6 +2206,33 @@
   }
 
   .modal-sm { max-width: 400px; }
+  .edit-photos { display: flex; flex-wrap: wrap; gap: 10px; }
+  .edit-photo { position: relative; width: 120px; height: 90px; border: 1px solid var(--hairline); border-radius: var(--r-md); overflow: hidden; background: var(--canvas-soft-2); display: flex; align-items: center; justify-content: center; }
+  .edit-photo img { width: 100%; height: 100%; object-fit: cover; }
+  .edit-photo-removed img { opacity: 0.25; }
+  .edit-photo-removed { border-color: var(--error); }
+  .edit-photo-loading { font-size: 11px; color: var(--mute); }
+  .edit-photo-btn { position: absolute; right: 4px; bottom: 4px; padding: 2px 8px; font-size: 11px; font-weight: 500; border-radius: var(--r-sm); border: 1px solid var(--hairline); background: var(--canvas); color: var(--error); cursor: pointer; }
+  .edit-photo-removed .edit-photo-btn { color: var(--body); }
+  .edit-photo-hint { font-size: 12px; color: var(--error); }
+  .edit-photo-note { font-size: 12px; color: var(--mute); }
+  .edit-photo-new { border-color: var(--link); }
+  .edit-photo-tag { position: absolute; left: 4px; top: 4px; padding: 1px 6px; font-size: 10px; font-weight: 600; border-radius: var(--r-sm); background: var(--link); color: var(--on-primary); }
+  .edit-photo-add { border-style: dashed; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--body); }
+  .edit-photo-add:hover { background: var(--canvas-soft); }
+  .modal-wide { max-width: 780px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
+  .form-section { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--canvas-soft); }
+  .form-section-title { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0; }
+  .form-section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 4px; }
+  .form-section-actions { display: flex; gap: 8px; }
+  .form-checks { flex-direction: row; align-items: center; gap: 16px; font-size: 13px; color: var(--body); }
+  .spec-row { display: grid; gap: 6px; align-items: center; }
+  .spec-row-hardware { grid-template-columns: 62px repeat(5, minmax(0, 1fr)) 28px; }
+  .spec-row-peripheral { grid-template-columns: 130px repeat(4, minmax(0, 1fr)) 28px; }
+  .spec-row-type { font-size: 12px; font-weight: 600; color: var(--body); }
+  .spec-row-remove { width: 28px; height: 28px; border: 1px solid var(--hairline); border-radius: var(--r-sm); background: var(--canvas); color: var(--mute); cursor: pointer; font-size: 16px; line-height: 1; }
+  .spec-row-remove:hover { color: var(--error); border-color: var(--error); }
+  @media (max-width: 700px) { .spec-row-hardware, .spec-row-peripheral { grid-template-columns: 1fr 1fr; } }
 
   .modal-head {
     display: flex;

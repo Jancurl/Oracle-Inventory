@@ -29,21 +29,7 @@ router.get("/", async (req: AuthRequest, res: Response) => {
     include: { branch: { select: { id: true, name: true } }, _count: { select: { employees: true } } },
     orderBy: { name: "asc" },
   });
-  // An employee's branch is stored separately from their department's, so the
-  // two can differ. Report which branch each department's employees sit in.
-  const perBranch = await prisma.employee.groupBy({
-    by: ["departmentId", "branchId"],
-    where: { departmentId: { in: departments.map((d) => d.id) } },
-    _count: { _all: true },
-  });
-  const employeesByBranch = new Map<string, Record<string, number>>();
-  for (const row of perBranch) {
-    if (!row.departmentId || !row.branchId) continue;
-    const counts = employeesByBranch.get(row.departmentId) ?? {};
-    counts[row.branchId] = row._count._all;
-    employeesByBranch.set(row.departmentId, counts);
-  }
-  res.json(departments.map((d) => ({ ...d, employeesByBranch: employeesByBranch.get(d.id) ?? {} })));
+  res.json(departments);
   } catch (error) { departmentError(res, error); }
 });
 
