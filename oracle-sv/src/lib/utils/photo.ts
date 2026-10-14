@@ -42,3 +42,38 @@ export async function shrinkPhoto(file: File): Promise<File> {
   if (!blob) throw new Error(`"${file.name}" could not be prepared for upload.`);
   return new File([blob], `${file.name.replace(/\.[^.]+$/, '')}.jpg`, { type: 'image/jpeg' });
 }
+
+/** Side, in pixels, of a stored profile photo. */
+const AVATAR_SIDE = 256;
+
+/**
+ * A profile photo is shown as a small circle, so it is cropped to the centre
+ * square and scaled to AVATAR_SIDE before upload. Throws when the file is not
+ * an image the browser can read.
+ */
+export async function shrinkAvatar(file: File): Promise<File> {
+  let bitmap: ImageBitmap;
+  try {
+    bitmap = await createImageBitmap(file);
+  } catch {
+    throw new Error(`"${file.name}" is not a photo this browser can read. Use a JPG, PNG or WebP image.`);
+  }
+
+  const side = Math.min(bitmap.width, bitmap.height);
+  const canvas = document.createElement('canvas');
+  canvas.width = AVATAR_SIDE;
+  canvas.height = AVATAR_SIDE;
+  const context = canvas.getContext('2d');
+  if (!context) {
+    bitmap.close();
+    throw new Error(`"${file.name}" could not be prepared for upload.`);
+  }
+  context.fillStyle = '#ffffff';
+  context.fillRect(0, 0, AVATAR_SIDE, AVATAR_SIDE);
+  context.drawImage(bitmap, (bitmap.width - side) / 2, (bitmap.height - side) / 2, side, side, 0, 0, AVATAR_SIDE, AVATAR_SIDE);
+  bitmap.close();
+
+  const blob = await new Promise<Blob | null>((resolve) => canvas.toBlob(resolve, 'image/jpeg', 0.85));
+  if (!blob) throw new Error(`"${file.name}" could not be prepared for upload.`);
+  return new File([blob], 'profile.jpg', { type: 'image/jpeg' });
+}

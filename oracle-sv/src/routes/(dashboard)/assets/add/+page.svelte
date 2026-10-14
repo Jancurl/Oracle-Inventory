@@ -209,10 +209,19 @@
 
   // Large photos are resized rather than rejected; a file that cannot be
   // used is reported instead of silently dropped.
-  async function handleAddPhotos(e: Event) {
+  let photoDragOver = $state(false);
+  function handleAddPhotos(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const files = Array.from(input.files ?? []);
     input.value = '';
+    void addPhotoFiles(files);
+  }
+  function handleDropPhotos(e: DragEvent) {
+    e.preventDefault();
+    photoDragOver = false;
+    void addPhotoFiles(Array.from(e.dataTransfer?.files ?? []).filter(f => f.type.startsWith('image/')));
+  }
+  async function addPhotoFiles(files: File[]) {
     photoErr = '';
     for (const original of files) {
       try {
@@ -678,16 +687,20 @@
 
         <div class="card-main">
           <!-- Left: photo gallery -->
-          <div class="image-col">
+          <!-- svelte-ignore a11y_no_static_element_interactions -->
+          <div
+            class="image-col"
+            class:image-col-drop={photoDragOver}
+            ondragover={(e) => { e.preventDefault(); photoDragOver = true; }}
+            ondragleave={() => (photoDragOver = false)}
+            ondrop={handleDropPhotos}
+          >
             {#if photos.length === 0}
-              <div class="image-empty">
-                <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.2" aria-hidden="true">
-                  <rect x="3" y="3" width="18" height="18" rx="3"/>
-                  <circle cx="8.5" cy="8.5" r="1.5"/>
-                  <path d="m21 15-5-5L5 21"/>
-                </svg>
-                <span class="empty-label">No photos</span>
-              </div>
+              <label class="image-empty image-empty-add" for="asset-images">
+                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/><path d="M19 2v6M16 5h6"/></svg>
+                <span class="empty-title">Add photos</span>
+                <span class="empty-label">Click or drop here</span>
+              </label>
             {:else}
               <div class="photo-grid">
                 {#each photos as photo (photo.id)}
@@ -1474,6 +1487,10 @@
     color: var(--mute);
     font-family: var(--font-sans);
   }
+  .empty-title { font-size: 12.5px; font-weight: 600; color: var(--ink); font-family: var(--font-sans); }
+  .image-empty-add { cursor: pointer; color: var(--mute); transition: border-color 120ms ease, color 120ms ease, background 120ms ease; }
+  .image-empty-add:hover { border-color: var(--link); color: var(--link); background: var(--canvas); }
+  .image-col-drop .image-empty, .image-col-drop .photo-grid { outline: 2px dashed var(--link); outline-offset: 3px; border-radius: var(--r-md); }
 
   /* ── Photo grid ── */
   .photo-grid {

@@ -95,10 +95,19 @@
   // Photos picked in the form are likewise only uploaded on Save.
   let editNewPhotos = $state<{ id: string; file: File; preview: string }[]>([]);
   let editPhotoErr  = $state('');
-  async function stagePhotos(e: Event) {
+  let editPhotoDragOver = $state(false);
+  function stagePhotos(e: Event) {
     const input = e.currentTarget as HTMLInputElement;
     const files = Array.from(input.files ?? []);
     input.value = '';
+    void stagePhotoFiles(files);
+  }
+  function dropStagedPhotos(e: DragEvent) {
+    e.preventDefault();
+    editPhotoDragOver = false;
+    void stagePhotoFiles(Array.from(e.dataTransfer?.files ?? []).filter(f => f.type.startsWith('image/')));
+  }
+  async function stagePhotoFiles(files: File[]) {
     editPhotoErr = '';
     for (const original of files) {
       try {
@@ -276,14 +285,18 @@
 
   let photoUploading = $state(false);
   let photoErr       = $state('');
-  async function addPhotos(e: Event) {
-    const input = e.currentTarget as HTMLInputElement;
-    const files = Array.from(input.files ?? []);
-    input.value = '';
-    if (files.length === 0) return;
+  let photoProgress  = $state('');
+  let photoDragOver  = $state(false);
+  const canEditPhotos = $derived(can('edit_inventory'));
+
+  async function addPhotoFiles(files: File[]) {
+    if (files.length === 0 || photoUploading) return;
     photoUploading = true; photoErr = '';
     try {
-      for (const original of files) await uploadPhoto(await shrinkPhoto(original));
+      for (const [index, original] of files.entries()) {
+        photoProgress = files.length > 1 ? `Uploading ${index + 1} of ${files.length}…` : 'Uploading…';
+        await uploadPhoto(await shrinkPhoto(original));
+      }
     } catch (err) {
       photoErr = (err as Error).message;
     } finally {
@@ -292,6 +305,18 @@
       photoIndex = 0;
       photoUploading = false;
     }
+  }
+  function addPhotos(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const files = Array.from(input.files ?? []);
+    input.value = '';
+    void addPhotoFiles(files);
+  }
+  function dropPhotos(e: DragEvent) {
+    photoDragOver = false;
+    if (!canEditPhotos) return;
+    e.preventDefault();
+    void addPhotoFiles(Array.from(e.dataTransfer?.files ?? []).filter(f => f.type.startsWith('image/')));
   }
 
   function stepPhoto(delta: number) {
@@ -815,39 +840,54 @@
       <div class="left-panel">
 
         <!-- Image area -->
-        <div class="img-area">
+        <!-- svelte-ignore a11y_no_static_element_interactions -->
+        <div
+          class="img-area"
+          class:img-area-drop={photoDragOver}
+          ondragover={(e) => { if (canEditPhotos) { e.preventDefault(); photoDragOver = true; } }}
+          ondragleave={() => (photoDragOver = false)}
+          ondrop={dropPhotos}
+        >
           {#if currentPhoto}
             <img class="img-photo" src={currentPhoto} alt="Photo of {asset.name}" />
+            {#if photoAttachments.length > 1}
+              <span class="img-count">{photoIndex + 1} / {photoAttachments.length}</span>
+            {/if}
+            {#if canEditPhotos}
+              <label class="img-add-pill" for="asset-photo-input"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg> Add photo</label>
+            {/if}
+          {:else if photoAttachments.length > 0}
+            <span class="img-label">Loading photo…</span>
+          {:else if canEditPhotos}
+            <label class="img-dropzone" for="asset-photo-input">
+              <svg width="34" height="34" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/><path d="M19 2v6M16 5h6"/></svg>
+              <span class="img-dropzone-title">Add a photo</span>
+              <span class="img-dropzone-sub">Drag and drop here, or click to browse</span>
+              <span class="img-dropzone-hint">JPG, PNG or WebP · large photos are resized automatically</span>
+            </label>
           {:else}
           <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1" class="img-icon"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><polyline points="21 15 16 10 5 21"/></svg>
           <span class="img-label">{asset.category?.name?.toUpperCase() ?? 'ASSET'}</span>
           {/if}
-        </div>
-
-        <!-- Nav: arrows + dots (decorative) -->
-        <div class="img-nav">
-          <button class="nav-arrow" aria-label="Previous image" onclick={() => stepPhoto(-1)}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
-          </button>
-          {#if photoAttachments.length > 1}
-            {#each photoAttachments as photo, i (photo.id)}<span class="dot" class:dot-on={i === photoIndex}></span>{/each}
-          {:else}
-            <span class="dot dot-on"></span>
-            <span class="dot"></span>
-            <span class="dot"></span>
+          {#if photoUploading}
+            <div class="img-uploading" role="status"><span class="img-spinner" aria-hidden="true"></span>{photoProgress}</div>
           {/if}
-          <button class="nav-arrow" aria-label="Next image" onclick={() => stepPhoto(1)}>
-            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
-          </button>
         </div>
+        {#if canEditPhotos}
+          <input id="asset-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple class="photo-add-input" disabled={photoUploading} onchange={addPhotos} />
+        {/if}
+        {#if photoErr}<div class="img-error" role="alert">{photoErr}</div>{/if}
 
-        {#if can('edit_inventory')}
-          <div class="photo-add">
-            <label class="btn-sm photo-add-btn" class:photo-add-busy={photoUploading} for="asset-photo-input">
-              {photoUploading ? 'Uploading…' : 'Add photo'}
-            </label>
-            <input id="asset-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple class="photo-add-input" disabled={photoUploading} onchange={addPhotos} />
-            {#if photoErr}<span class="photo-add-err" role="alert">{photoErr}</span>{/if}
+        <!-- Step through the photos (only when there is more than one) -->
+        {#if photoAttachments.length > 1}
+          <div class="img-nav">
+            <button class="nav-arrow" aria-label="Previous image" onclick={() => stepPhoto(-1)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="15 18 9 12 15 6"/></svg>
+            </button>
+            {#each photoAttachments as photo, i (photo.id)}<span class="dot" class:dot-on={i === photoIndex}></span>{/each}
+            <button class="nav-arrow" aria-label="Next image" onclick={() => stepPhoto(1)}>
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="9 18 15 12 9 6"/></svg>
+            </button>
           </div>
         {/if}
 
@@ -1326,7 +1366,14 @@
           </div>
           <div class="form-row">
             <span class="form-label">Photos</span>
-            <div class="edit-photos">
+            <!-- svelte-ignore a11y_no_static_element_interactions -->
+            <div
+              class="edit-photos"
+              class:edit-photos-drop={editPhotoDragOver}
+              ondragover={(e) => { e.preventDefault(); editPhotoDragOver = true; }}
+              ondragleave={() => (editPhotoDragOver = false)}
+              ondrop={dropStagedPhotos}
+            >
               {#each photoAttachments as photo (photo.id)}
                 {@const removed = editRemovedPhotos.has(photo.id)}
                 <div class="edit-photo" class:edit-photo-removed={removed}>
@@ -1345,7 +1392,11 @@
                   <button type="button" class="edit-photo-btn" onclick={() => clearStagedPhotos(photo.id)}>Remove</button>
                 </div>
               {/each}
-              <label class="edit-photo edit-photo-add" for="e-photo-input">+ Add photo</label>
+              <label class="edit-photo edit-photo-add" for="e-photo-input">
+                <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h7"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="m21 15-3.1-3.1a2 2 0 0 0-2.8 0L6 21"/><path d="M19 2v6M16 5h6"/></svg>
+                <span class="edit-photo-add-title">Add photo</span>
+                <span class="edit-photo-add-sub">Click or drop here</span>
+              </label>
               <input id="e-photo-input" type="file" accept="image/jpeg,image/png,image/webp" multiple class="photo-add-input" onchange={stagePhotos} />
             </div>
             {#if editPhotoErr}<span class="edit-photo-hint" role="alert">{editPhotoErr}</span>{/if}
@@ -1906,13 +1957,43 @@
   }
 
   .img-icon { flex-shrink: 0; }
-  .img-photo { max-width: 100%; max-height: 320px; object-fit: contain; border-radius: var(--r-md); }
-  .photo-add { display: flex; flex-direction: column; align-items: center; gap: 6px; padding: 10px 16px; border-bottom: 1px solid var(--hairline); background: var(--canvas); }
-  .photo-add-btn { cursor: pointer; border: 1px solid var(--hairline); background: var(--canvas); color: var(--body); }
-  .photo-add-btn:hover { background: var(--canvas-soft-2); }
-  .photo-add-busy { opacity: 0.6; pointer-events: none; }
+  .img-photo { width: 100%; max-height: 440px; object-fit: contain; border-radius: var(--r-md); }
+  .img-area { position: relative; transition: background 120ms ease; }
+  .img-area-drop { background: var(--canvas-soft); outline: 2px dashed var(--link); outline-offset: -10px; }
+  .img-dropzone {
+    display: flex; flex-direction: column; align-items: center; gap: 6px;
+    width: 100%; max-width: 320px; padding: 28px 20px;
+    border: 1.5px dashed var(--hairline-strong); border-radius: var(--r-lg);
+    background: var(--canvas); color: var(--mute); text-align: center; cursor: pointer;
+    transition: border-color 120ms ease, color 120ms ease, background 120ms ease;
+  }
+  .img-dropzone:hover { border-color: var(--link); color: var(--link); background: var(--canvas-soft); }
+  .img-dropzone-title { font-size: 14px; font-weight: 600; color: var(--ink); margin-top: 4px; }
+  .img-dropzone-sub { font-size: 12.5px; color: var(--body); }
+  .img-dropzone-hint { font-size: 11px; color: var(--mute); }
+  .img-add-pill {
+    position: absolute; top: 12px; right: 12px;
+    display: inline-flex; align-items: center; gap: 6px; padding: 6px 12px;
+    border: 1px solid var(--hairline); border-radius: var(--r-pill);
+    background: var(--canvas); color: var(--ink); font-size: 12.5px; font-weight: 500;
+    box-shadow: 0 1px 2px oklch(0% 0 0 / 8%); cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+  .img-add-pill:hover { background: var(--canvas-soft-2); border-color: var(--hairline-strong); }
+  .img-count {
+    position: absolute; left: 12px; bottom: 12px; padding: 3px 9px;
+    border-radius: var(--r-pill); background: oklch(0% 0 0 / 55%); color: oklch(100% 0 0);
+    font-size: 11.5px; font-weight: 500; font-variant-numeric: tabular-nums;
+  }
+  .img-uploading {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center; gap: 10px;
+    background: oklch(100% 0 0 / 78%); color: var(--ink); font-size: 13px; font-weight: 500;
+  }
+  .img-spinner { width: 16px; height: 16px; border-radius: 50%; border: 2px solid var(--hairline-strong); border-top-color: var(--ink); animation: img-spin 0.7s linear infinite; }
+  @keyframes img-spin { to { transform: rotate(360deg); } }
+  .img-error { padding: 8px 14px; font-size: 12px; color: var(--error); background: var(--error-soft); border-top: 1px solid var(--hairline); text-align: center; }
+  @media (prefers-reduced-motion: reduce) { .img-spinner { animation: none; } }
   .photo-add-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
-  .photo-add-err { font-size: 12px; color: var(--error); text-align: center; }
 
   .img-label {
     font-size: 11px;
@@ -2218,8 +2299,12 @@
   .edit-photo-note { font-size: 12px; color: var(--mute); }
   .edit-photo-new { border-color: var(--link); }
   .edit-photo-tag { position: absolute; left: 4px; top: 4px; padding: 1px 6px; font-size: 10px; font-weight: 600; border-radius: var(--r-sm); background: var(--link); color: var(--on-primary); }
-  .edit-photo-add { border-style: dashed; cursor: pointer; font-size: 12px; font-weight: 500; color: var(--body); }
-  .edit-photo-add:hover { background: var(--canvas-soft); }
+  .edit-photos { padding: 8px; border: 1.5px dashed transparent; border-radius: var(--r-md); margin: -8px; transition: border-color 120ms ease, background 120ms ease; }
+  .edit-photos-drop { border-color: var(--link); background: var(--canvas-soft); }
+  .edit-photo-add { flex-direction: column; gap: 2px; border-style: dashed; border-color: var(--hairline-strong); background: var(--canvas); color: var(--mute); cursor: pointer; text-align: center; transition: border-color 120ms ease, color 120ms ease, background 120ms ease; }
+  .edit-photo-add:hover { border-color: var(--link); color: var(--link); background: var(--canvas-soft); }
+  .edit-photo-add-title { font-size: 12px; font-weight: 600; color: var(--ink); }
+  .edit-photo-add-sub { font-size: 10.5px; color: var(--mute); }
   .modal-wide { max-width: 780px; max-height: calc(100vh - 48px); display: flex; flex-direction: column; }
   .form-section { display: flex; flex-direction: column; gap: 12px; padding: 14px; border: 1px solid var(--hairline); border-radius: var(--r-md); background: var(--canvas-soft); }
   .form-section-title { font-size: 13px; font-weight: 600; color: var(--ink); margin: 0; }

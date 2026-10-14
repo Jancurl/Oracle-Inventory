@@ -4,7 +4,7 @@
   import { api } from '$lib/api';
   import { can } from '$lib/utils/permissions';
   import { onChange } from '$lib/ws';
-  import { avatarColor, initials } from '$lib/utils/avatarColor';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
   import Breadcrumb from '$lib/components/Breadcrumb.svelte';
   import StatCard from '$lib/components/StatCard.svelte';
   import SearchInput from '$lib/components/SearchInput.svelte';
@@ -27,6 +27,7 @@
     createdAt: string;
     role: { id: string; name: string } | null;
     branch: { id: string; name: string } | null;
+    avatar?: { updatedAt: string } | null;
   }
 
   interface Role   { id: string; name: string; }
@@ -313,7 +314,7 @@
                 onkeydown={(e) => e.key === 'Enter' && goto(`/users/${u.id}`)}
               >
                 <td class="cell-user">
-                  <div class="u-avatar" style="background:{avatarColor(u.id)}">{initials(u.name)}</div>
+                  <UserAvatar id={u.id} name={u.name} size={36} hasPhoto={u.avatar === undefined ? undefined : !!u.avatar} />
                   <div class="u-identity">
                     <span class="u-name">{u.name}</span>
                     <span class="u-email">{u.email}</span>

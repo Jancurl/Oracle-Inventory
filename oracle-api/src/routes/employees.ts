@@ -1,4 +1,5 @@
 import { Router, Response } from "express";
+import multer from "multer";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission, AuthRequest } from "../middleware/auth";
 import { logActivity } from "../lib/activity";
@@ -7,9 +8,18 @@ import { isZohoConfigured, enrichEmployee } from "../lib/integrations/zoho";
 const router = Router();
 router.use(requireAuth);
 
+const PHOTO_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const photoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, PHOTO_MIME_TYPES.has(file.mimetype)),
+});
+
 const include = {
   branch: { select: { id: true, name: true } },
   department: { select: { id: true, name: true } },
+  // Only whether a photo exists and when it changed — never the bytes.
+  photo: { select: { updatedAt: true } },
   assignments: {
     where: { status: "active" as const },
     include: { asset: { select: { id: true, name: true } } },
@@ -60,6 +70,7 @@ router.get("/:id", requirePermission("view_inventory"), async (req: AuthRequest,
     include: {
       branch: { select: { id: true, name: true } },
       department: { select: { id: true, name: true } },
+      photo: { select: { updatedAt: true } },
       assignments: {
         orderBy: { assignedAt: "desc" as const },
         include: {
@@ -218,6 +229,35 @@ router.put("/:id", requirePermission("manage_stock"), async (req: AuthRequest, r
   });
   await logActivity({ userId: req.user!.id, action: "update", entity: "Employee", entityId: employee.id, branchId: employee.branchId, metadata: { name } });
   res.json(employee);
+});
+
+// GET /api/employees/:id/photo
+router.get("/:id/photo", requirePermission("view_inventory"), async (req: AuthRequest, res: Response) => {
+  const photo = await prisma.employeePhoto.findUnique({ where: { employeeId: req.params.id } });
+  if (!photo) { res.status(404).json({ error: "No profile photo." }); return; }
+  res.setHeader("Content-Type", photo.mimeType);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.send(Buffer.from(photo.data));
+});
+
+// PUT /api/employees/:id/photo — multipart field "file"
+router.put("/:id/photo", requirePermission("manage_stock"), photoUpload.single("file"), async (req: AuthRequest, res: Response) => {
+  if (!req.file) { res.status(400).json({ error: "Choose a JPG, PNG or WebP image under 1MB." }); return; }
+  const employee = await prisma.employee.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, branchId: true } });
+  if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
+  const image = { mimeType: req.file.mimetype, data: new Uint8Array(req.file.buffer) };
+  const photo = await prisma.employeePhoto.upsert({ where: { employeeId: employee.id }, create: { employeeId: employee.id, ...image }, update: image, select: { updatedAt: true } });
+  await logActivity({ userId: req.user!.id, action: "photo_updated", entity: "Employee", entityId: employee.id, branchId: employee.branchId, metadata: { name: employee.name } });
+  res.json({ updatedAt: photo.updatedAt });
+});
+
+// DELETE /api/employees/:id/photo
+router.delete("/:id/photo", requirePermission("manage_stock"), async (req: AuthRequest, res: Response) => {
+  const employee = await prisma.employee.findUnique({ where: { id: req.params.id }, select: { id: true, name: true, branchId: true } });
+  if (!employee) { res.status(404).json({ error: "Employee not found" }); return; }
+  await prisma.employeePhoto.deleteMany({ where: { employeeId: employee.id } });
+  await logActivity({ userId: req.user!.id, action: "photo_removed", entity: "Employee", entityId: employee.id, branchId: employee.branchId, metadata: { name: employee.name } });
+  res.json({ success: true });
 });
 
 // PATCH /api/employees/:id/status — toggle isActive

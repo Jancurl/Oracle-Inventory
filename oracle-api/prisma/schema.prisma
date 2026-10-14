@@ -75,6 +75,17 @@ model SystemUser {
   stockCountsApproved     StockCountSession[]    @relation("StockCountApprovedBy")
   deviceCredentialChanges NetworkDeviceCredential[] @relation("NetworkDeviceCredentialUpdater")
   uploadedAttachments     AssetAttachment[]
+  avatar                  UserAvatar?
+}
+
+// Profile photo of a login account. Kept apart from SystemUser so that
+// listing users never loads image bytes.
+model UserAvatar {
+  userId    String     @id
+  mimeType  String
+  data      Bytes
+  updatedAt DateTime   @updatedAt
+  user      SystemUser @relation(fields: [userId], references: [id], onDelete: Cascade)
 }
 
 model OtpCode {
@@ -189,6 +200,17 @@ model Employee {
   department     Department?       @relation(fields: [departmentId], references: [id])
   movementLogs   MovementLog[]
   stockMovements StockMovement[]
+  photo          EmployeePhoto?
+}
+
+// Profile photo of an employee record, kept apart from Employee so that
+// listing employees never loads image bytes.
+model EmployeePhoto {
+  employeeId String   @id
+  mimeType   String
+  data       Bytes
+  updatedAt  DateTime @updatedAt
+  employee   Employee @relation(fields: [employeeId], references: [id], onDelete: Cascade)
 }
 
 model Asset {

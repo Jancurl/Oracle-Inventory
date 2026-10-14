@@ -9,6 +9,7 @@
   import SearchInput from '$lib/components/SearchInput.svelte';
   import Pagination from '$lib/components/Pagination.svelte';
   import Modal from '$lib/components/Modal.svelte';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
 
   // ── Types ─────────────────────────────────────────────────────────────────
   type EmpSource = 'imported' | 'excel' | 'zoho' | 'manual';
@@ -26,6 +27,7 @@
     branch:      { id: string; name: string } | null;
     department:  { id: string; name: string } | null;
     assignments: { id: string; asset: { id: string; name: string } }[];
+    photo?: { updatedAt: string } | null;
   }
 
   interface Branch     { id: string; name: string; }
@@ -375,7 +377,7 @@
                   </td>
                 {/if}
                 <td class="cell-name">
-                  <span class="avatar">{emp.name.charAt(0).toUpperCase()}</span>
+                  <UserAvatar id={emp.id} kind="employee" name={emp.name} size={28} hasPhoto={emp.photo === undefined ? undefined : !!emp.photo} />
                   <span class="name-text">{emp.name}</span>
                   {#if !emp.isActive}<span class="badge badge-muted">Inactive</span>{/if}
                 </td>

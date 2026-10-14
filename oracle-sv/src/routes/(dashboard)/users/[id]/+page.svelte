@@ -6,6 +6,7 @@
   import { authStore } from '$lib/stores/auth.svelte';
   import { can } from '$lib/utils/permissions';
   import { onChange } from '$lib/ws';
+  import UserAvatarEditor from '$lib/components/UserAvatarEditor.svelte';
 
   // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -83,23 +84,6 @@
   onDestroy(onChange(['User', 'Role', 'Branch'], () => loadUser()));
 
   // ── Helpers ───────────────────────────────────────────────────────────────────
-
-  function initials(name: string) {
-    return name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
-  }
-
-  const AVATAR_COLORS = [
-    'oklch(52% 0.21 264)', 'oklch(55% 0.18 210)', 'oklch(55% 0.19 155)',
-    'oklch(52% 0.22 340)', 'oklch(60% 0.20 60)',  'oklch(48% 0.22 300)',
-    'oklch(52% 0.16 55)',  'oklch(42% 0.18 240)', 'oklch(50% 0.18 180)',
-    'oklch(44% 0.20 20)',
-  ];
-
-  function avatarColor(id: string) {
-    let h = 0;
-    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-    return AVATAR_COLORS[h % AVATAR_COLORS.length];
-  }
 
   function formatDate(iso: string) {
     return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
@@ -354,7 +338,7 @@
 
           <!-- Avatar panel -->
           <div class="avatar-panel">
-            <div class="avatar-circle" style="background:{avatarColor(user.id)}">{initials(user.name)}</div>
+            <UserAvatarEditor userId={user.id} name={user.name} size={72} canEdit={isSelf || (can('manage_users') && !isSuperAdminUser)} />
             {#if editMode}
               <input class="ap-input ap-name-input" bind:value={draft.name} placeholder="Full name" />
               <input class="ap-input ap-email-input" bind:value={draft.email} type="email" placeholder="email@example.com" />

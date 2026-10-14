@@ -1,4 +1,5 @@
-import { Router, Response } from "express";
+import { Router, Response, NextFunction } from "express";
+import multer from "multer";
 import bcrypt from "bcryptjs";
 import { prisma } from "../lib/prisma";
 import { requireAuth, requirePermission, requireSuperAdmin, AuthRequest } from "../middleware/auth";
@@ -14,7 +15,23 @@ const userSelect = {
   status: true, roleId: true, branchId: true, createdAt: true,
   role:   { select: { id: true, name: true } },
   branch: { select: { id: true, name: true } },
+  // Only whether a photo exists and when it changed — never the bytes.
+  avatar: { select: { updatedAt: true } },
 };
+
+const AVATAR_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 1024 * 1024 },
+  fileFilter: (_req, file, cb) => cb(null, AVATAR_MIME_TYPES.has(file.mimetype)),
+});
+// "me" in an avatar URL means the signed-in user.
+const avatarUserId = (req: AuthRequest) => (req.params.id === "me" ? req.user!.id : req.params.id);
+// Anyone may change their own photo; changing someone else's needs manage_users.
+function canChangeAvatar(req: AuthRequest, res: Response, next: NextFunction) {
+  if (avatarUserId(req) === req.user!.id) { next(); return; }
+  void requirePermission("manage_users")(req, res, next);
+}
 
 async function isProtectedUser(id: string) {
   const user = await prisma.systemUser.findUnique({ where: { id }, include: { role: { select: { name: true } } } });
@@ -89,10 +106,43 @@ router.get("/me", async (req: AuthRequest, res: Response) => {
     select: {
       id: true, name: true, email: true, position: true, phone: true,
       role: { select: { id: true, name: true } },
+      avatar: { select: { updatedAt: true } },
     },
   });
   if (!user) { res.status(404).json({ error: "User not found" }); return; }
   res.json(user);
+});
+
+// GET /api/users/:id/avatar  (:id may be "me") — any signed-in user may see a profile photo
+router.get("/:id/avatar", async (req: AuthRequest, res: Response) => {
+  const avatar = await prisma.userAvatar.findUnique({ where: { userId: avatarUserId(req) } });
+  if (!avatar) { res.status(404).json({ error: "No profile photo." }); return; }
+  res.setHeader("Content-Type", avatar.mimeType);
+  res.setHeader("Cache-Control", "private, max-age=300");
+  res.send(Buffer.from(avatar.data));
+});
+
+// PUT /api/users/:id/avatar  (:id may be "me") — multipart field "file"
+router.put("/:id/avatar", canChangeAvatar, avatarUpload.single("file"), async (req: AuthRequest, res: Response) => {
+  const userId = avatarUserId(req);
+  if (!req.file) { res.status(400).json({ error: "Choose a JPG, PNG or WebP image under 1MB." }); return; }
+  const user = await prisma.systemUser.findUnique({ where: { id: userId }, select: { id: true, name: true } });
+  if (!user) { res.status(404).json({ error: "User not found" }); return; }
+  if (userId !== req.user!.id && await isProtectedUser(userId)) { res.status(403).json({ error: "Super Admin users are protected." }); return; }
+
+  const image = { mimeType: req.file.mimetype, data: new Uint8Array(req.file.buffer) };
+  const avatar = await prisma.userAvatar.upsert({ where: { userId }, create: { userId, ...image }, update: image, select: { updatedAt: true } });
+  await logActivity({ userId: req.user!.id, action: "avatar_updated", entity: "User", entityId: userId, metadata: { name: user.name } });
+  res.json({ updatedAt: avatar.updatedAt });
+});
+
+// DELETE /api/users/:id/avatar  (:id may be "me")
+router.delete("/:id/avatar", canChangeAvatar, async (req: AuthRequest, res: Response) => {
+  const userId = avatarUserId(req);
+  if (userId !== req.user!.id && await isProtectedUser(userId)) { res.status(403).json({ error: "Super Admin users are protected." }); return; }
+  await prisma.userAvatar.deleteMany({ where: { userId } });
+  await logActivity({ userId: req.user!.id, action: "avatar_removed", entity: "User", entityId: userId, metadata: {} });
+  res.json({ success: true });
 });
 
 // PUT /api/users/me

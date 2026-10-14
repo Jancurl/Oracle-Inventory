@@ -5,6 +5,7 @@
   import { page } from '$app/stores';
   import { authStore } from '$lib/stores/auth.svelte';
   import { api } from '$lib/api';
+  import { avatarStore, userPhotoPath } from '$lib/stores/avatars.svelte';
 
   interface Props {
     mobileSidebarOpen?: boolean;
@@ -111,6 +112,9 @@
   const userName    = $derived(authStore.user?.name  ?? 'User');
   const userEmail   = $derived(authStore.user?.email ?? '');
   const userInitial = $derived(userName.charAt(0).toUpperCase());
+  const userId      = $derived(authStore.user?.id ?? '');
+  const userPhoto   = $derived(userId ? avatarStore.url(userPhotoPath(userId)) ?? '' : '');
+  $effect(() => { if (userId) void avatarStore.load(userPhotoPath(userId)); });
 
   let expanded = $state(true);
   let openIds  = $state(new Set<string>());
@@ -281,7 +285,11 @@
   <div class="sidebar-foot">
     <div class="foot-sep"></div>
     <div class="user-row">
-      <span class="avatar" aria-hidden="true">{userInitial}</span>
+      {#if userPhoto}
+        <img class="avatar avatar-photo" src={userPhoto} alt="" />
+      {:else}
+        <span class="avatar" aria-hidden="true">{userInitial}</span>
+      {/if}
       <span class="user-text">
         <span class="user-name">{userName}</span>
         <span class="user-email">{userEmail}</span>
@@ -557,6 +565,8 @@
     border-radius: 10px;
     cursor: default;
   }
+
+  .avatar-photo { object-fit: cover; }
 
   .avatar {
     width: 30px;

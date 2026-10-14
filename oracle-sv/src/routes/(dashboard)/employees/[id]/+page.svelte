@@ -5,6 +5,9 @@
   import { api } from '$lib/api';
   import { can } from '$lib/utils/permissions';
   import { onChange } from '$lib/ws';
+  import UserAvatar from '$lib/components/UserAvatar.svelte';
+  import { avatarStore, employeePhotoPath } from '$lib/stores/avatars.svelte';
+  import { shrinkAvatar } from '$lib/utils/photo';
 
   // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -36,6 +39,7 @@
     branch:       { id: string; name: string } | null;
     department:   { id: string; name: string } | null;
     assignments:  Assignment[];
+    photo?:       { updatedAt: string } | null;
   }
 
   interface Branch     { id: string; name: string; }
@@ -86,23 +90,6 @@
 
   // ── Helpers ──────────────────────────────────────────────────────────────────
 
-  function initials(name: string) {
-    return name.split(' ').map(n => n[0]).join('').slice(0, 2).toUpperCase();
-  }
-
-  const AVATAR_COLORS = [
-    'oklch(52% 0.21 264)', 'oklch(55% 0.18 210)', 'oklch(55% 0.19 155)',
-    'oklch(52% 0.22 340)', 'oklch(60% 0.20 60)',  'oklch(48% 0.22 300)',
-    'oklch(52% 0.16 55)',  'oklch(42% 0.18 240)', 'oklch(50% 0.18 180)',
-    'oklch(44% 0.20 20)',
-  ];
-
-  function avatarColor(id: string) {
-    let h = 0;
-    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-    return AVATAR_COLORS[h % AVATAR_COLORS.length];
-  }
-
   function formatDate(iso: string) {
     return new Date(iso).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric' });
   }
@@ -147,6 +134,7 @@
         departmentId: draft.departmentId        || null,
         isActive:     employee.isActive,
       });
+      await savePhoto();
       editMode = false;
     } catch (e) {
       saveErr = (e as Error).message;
@@ -155,7 +143,54 @@
     }
   }
 
-  function discardEdit() { editMode = false; saveErr = ''; }
+  function discardEdit() { editMode = false; saveErr = ''; resetPhotoDraft(); }
+
+  // ── Photo (changed in Edit, saved with the rest) ────────────────────────────
+  let photoDraft    = $state<{ file: File; preview: string } | null>(null);
+  let photoRemove   = $state(false);
+  let photoErr      = $state('');
+  const hasSavedPhoto = $derived(!!avatarStore.url(employeePhotoPath(empId ?? "")));
+
+  function resetPhotoDraft() {
+    if (photoDraft) URL.revokeObjectURL(photoDraft.preview);
+    photoDraft = null; photoRemove = false; photoErr = '';
+  }
+  async function pickPhoto(e: Event) {
+    const input = e.currentTarget as HTMLInputElement;
+    const original = input.files?.[0];
+    input.value = '';
+    if (!original) return;
+    photoErr = '';
+    try {
+      const file = await shrinkAvatar(original);
+      if (photoDraft) URL.revokeObjectURL(photoDraft.preview);
+      photoDraft = { file, preview: URL.createObjectURL(file) };
+      photoRemove = false;
+    } catch (err) {
+      photoErr = (err as Error).message;
+    }
+  }
+  function markPhotoRemoved() {
+    if (photoDraft) { URL.revokeObjectURL(photoDraft.preview); photoDraft = null; }
+    photoRemove = true;
+  }
+  async function savePhoto() {
+    const path = employeePhotoPath(empId ?? "");
+    if (photoDraft) {
+      const form = new FormData();
+      form.append('file', photoDraft.file);
+      const res = await api.raw(path, { method: 'PUT', body: form });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({})) as { error?: string };
+        throw new Error(body.error ?? `Could not save the photo (HTTP ${res.status}).`);
+      }
+      avatarStore.set(path, photoDraft.file);
+    } else if (photoRemove) {
+      await api.delete(path);
+      avatarStore.set(path, null);
+    }
+    resetPhotoDraft();
+  }
 
   // ── Status toggle ─────────────────────────────────────────────────────────────
 
@@ -278,7 +313,27 @@
 
           <!-- Avatar panel -->
           <div class="avatar-panel">
-            <div class="avatar-circle" style="background:{avatarColor(employee.id)}">{initials(employee.name)}</div>
+            <UserAvatar
+              id={employee.id}
+              kind="employee"
+              name={employee.name}
+              size={72}
+              hasPhoto={employee.photo === undefined ? undefined : !!employee.photo}
+              preview={photoDraft?.preview ?? (photoRemove ? '' : undefined)}
+            />
+            {#if editMode}
+              <div class="photo-actions">
+                <label class="photo-btn" for="employee-photo-input">{photoDraft || (hasSavedPhoto && !photoRemove) ? 'Change photo' : 'Add photo'}</label>
+                <input id="employee-photo-input" class="photo-input" type="file" accept="image/jpeg,image/png,image/webp" onchange={pickPhoto} />
+                {#if photoDraft || (hasSavedPhoto && !photoRemove)}
+                  <button type="button" class="photo-btn photo-btn-remove" onclick={markPhotoRemoved}>Remove</button>
+                {:else if photoRemove}
+                  <button type="button" class="photo-btn" onclick={() => (photoRemove = false)}>Undo</button>
+                {/if}
+              </div>
+              {#if photoErr}<span class="photo-err" role="alert">{photoErr}</span>{/if}
+              {#if photoDraft || photoRemove}<span class="photo-note">Photo change is saved with "Save changes".</span>{/if}
+            {/if}
             {#if editMode}
               <input class="ap-input ap-name-input" bind:value={draft.name} placeholder="Full name" />
             {:else}
@@ -480,6 +535,13 @@
   .profile-card { background: var(--canvas); border: 1px solid var(--hairline); border-radius: var(--r-lg); box-shadow: var(--shadow-l1); overflow: hidden; }
   .profile-row  { display: grid; grid-template-columns: 176px 1fr; }
   .avatar-panel { background: var(--canvas-soft-2); border-right: 1px solid var(--hairline); padding: 28px 16px; display: flex; flex-direction: column; align-items: center; gap: 8px; }
+  .photo-actions { display: flex; gap: 6px; flex-wrap: wrap; justify-content: center; margin-top: 2px; }
+  .photo-btn { padding: 4px 10px; border-radius: var(--r-sm); border: 1px solid var(--hairline); background: var(--canvas); color: var(--body); font-family: var(--font-sans); font-size: 12px; font-weight: 500; cursor: pointer; line-height: 1.4; }
+  .photo-btn:hover { background: var(--canvas-soft-2); border-color: var(--hairline-strong); }
+  .photo-btn-remove { color: var(--error); }
+  .photo-input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+  .photo-err { font-size: 12px; color: var(--error); text-align: center; max-width: 200px; }
+  .photo-note { font-size: 11px; color: var(--mute); text-align: center; max-width: 200px; }
   .avatar-circle { width: 64px; height: 64px; border-radius: 999px; display: flex; align-items: center; justify-content: center; font-size: 20px; font-weight: 700; font-family: var(--font-sans); color: oklch(99% 0.003 106); flex-shrink: 0; letter-spacing: 0.5px; margin-bottom: 4px; }
   .prof-name  { font-size: 15px; font-weight: 600; color: var(--ink); font-family: var(--font-sans); letter-spacing: -0.3px; text-align: center; }
   .emp-id-text { font-size: 11.5px; color: var(--mute); font-family: var(--font-mono); text-align: center; }

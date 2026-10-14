@@ -4,6 +4,7 @@
   import { page } from '$app/stores';
   import { authStore } from '$lib/stores/auth.svelte';
   import { api } from '$lib/api';
+  import UserAvatarEditor from '$lib/components/UserAvatarEditor.svelte';
 
   /* ── Active subnav panel ── */
   let activePanel = $state('general');
@@ -377,6 +378,12 @@
             <p class="panel-sub">Update your personal account information.</p>
           </div>
 
+          {#if authStore.user}
+            <div class="profile-photo">
+              <UserAvatarEditor userId={authStore.user.id} name={authStore.user.name} size={72} canEdit />
+            </div>
+          {/if}
+
           {#if profileError}
             <div class="error-bar">{profileError}</div>
           {/if}
@@ -622,6 +629,7 @@
 {/if}
 
 <style>
+  .profile-photo { display: flex; justify-content: flex-start; margin-bottom: 18px; }
   .page {
     display: flex;
     flex-direction: column;
