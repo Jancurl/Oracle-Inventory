@@ -50,6 +50,7 @@
             { id: 'assets-all',    label: 'All Assets',    href: '/assets',        permission: 'view_inventory' },
             { id: 'assets-add',    label: 'Add Asset',     href: '/assets/add',    permission: 'create_inventory' },
             { id: 'assets-import', label: 'Import Assets', href: '/assets/import', permission: 'import_inventory' },
+            { id: 'assets-belarc', label: 'Import Belarc', href: '/assets/belarc', permission: 'create_inventory' },
           ],
         },
         { id: 'assignments', label: 'Assignments', icon: 'clipboard', href: '/assignments', permission: 'view_inventory' },

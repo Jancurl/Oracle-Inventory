@@ -7,6 +7,8 @@
   import { authStore } from '$lib/stores/auth.svelte';
   import { can } from '$lib/utils/permissions';
   import { shrinkPhoto } from '$lib/utils/photo';
+  import BelarcFillButton from '$lib/components/BelarcFillButton.svelte';
+  import { computerCategoryFor, fillBlanks, fillHardwareRows, type BelarcReading } from '$lib/utils/belarc';
 
   // ── API types ─────────────────────────────────────────────────────────────
   interface ApiAsset {
@@ -68,7 +70,7 @@
 
   // Category-specific details in the Edit form. Which block shows follows the
   // category chosen in the form, the same way the Add Asset form does.
-  type HardwareRow   = { type: 'ram' | 'storage'; slotOrBay: string; brand: string; model: string; serialNumber: string; capacity: string };
+  type HardwareRow   = { type: 'ram' | 'storage'; slotOrBay: string; brand: string; model: string; serialNumber: string; capacity: string; storageKind?: string };
   type PeripheralRow = { type: string; brand: string; model: string; serialNumber: string; propertyTag: string };
   const PERIPHERAL_TYPES = [
     { value: 'monitor', label: 'Monitor' }, { value: 'keyboard', label: 'Keyboard' }, { value: 'mouse', label: 'Mouse' },
@@ -80,7 +82,7 @@
     { value: 'hdd_ssd_docking_station', label: 'HDD/SSD Docking Station' },
     { value: 'nvme_docking_station', label: 'NVME/SSD Docking Station' },
   ];
-  let editSpecs = $state({ computerName: '', brand: '', model: '', processor: '', motherboard: '', operatingSystem: '', osVersion: '', osInstallDate: '', imeiNumber: '', propertyTag: '' });
+  let editSpecs = $state({ computerName: '', macAddress: '', brand: '', model: '', processor: '', motherboard: '', operatingSystem: '', osVersion: '', osInstallDate: '', imeiNumber: '', propertyTag: '' });
   let editHardware    = $state<HardwareRow[]>([]);
   let editPeripherals = $state<PeripheralRow[]>([]);
   let editCamera   = $state({ physicalLocation: '', coverageArea: '', cameraType: 'fixed', resolution: '', installationDate: '', nightVision: false, motionDetection: false, notes: '' });
@@ -445,14 +447,14 @@
     };
     const profile = asset.deviceProfile;
     editSpecs = {
-      computerName: asset.computerName ?? '',
+      computerName: asset.computerName ?? '', macAddress: asset.macAddress ?? '',
       brand: profile?.brand ?? '', model: profile?.model ?? '',
       processor: profile?.processor ?? '', motherboard: profile?.motherboard ?? '',
       operatingSystem: profile?.operatingSystem ?? '', osVersion: profile?.osVersion ?? '',
       osInstallDate: profile?.osInstallDate ? profile.osInstallDate.slice(0, 10) : '',
       imeiNumber: asset.imeiNumber ?? '', propertyTag: asset.propertyTag ?? '',
     };
-    editHardware = hardwareParts.map(c => ({ type: c.type as 'ram' | 'storage', slotOrBay: c.slotOrBay ?? '', brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', capacity: c.capacity ?? '' }));
+    editHardware = hardwareParts.map(c => ({ type: c.type as 'ram' | 'storage', slotOrBay: c.slotOrBay ?? '', brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', capacity: c.capacity ?? '', storageKind: c.storageKind ?? undefined }));
     editPeripherals = peripheralParts.map(c => ({ type: c.type, brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', propertyTag: c.propertyTag ?? '' }));
     editCamera = {
       physicalLocation: cameraInfo?.physicalLocation ?? '', coverageArea: cameraInfo?.coverageArea ?? '',
@@ -473,6 +475,37 @@
     for (const photo of photoAttachments) void loadPhoto(photo.id);
     editErr = '';
     showEdit = true;
+  }
+
+  // ── Fill the Edit form from a Belarc Advisor report: empty fields only ──────
+  let undoBelarc = () => {};
+  function applyBelarc({ fill }: BelarcReading) {
+    const before = { form: { ...editForm }, specs: { ...editSpecs }, hardware: editHardware.map(r => ({ ...r })) };
+    undoBelarc = () => { editForm = before.form; editSpecs = before.specs; editHardware = before.hardware; };
+    const spec = (label: string, value: string | null, key: keyof typeof editSpecs) =>
+      ({ label, value, get: () => editSpecs[key], set: (v: string) => (editSpecs[key] = v) });
+    const result = fillBlanks([
+      { label: 'Serial number', value: fill.serialNumber, get: () => editForm.serialNumber, set: v => (editForm.serialNumber = v) },
+      spec('Computer name', fill.computerName, 'computerName'),
+      spec('MAC address', fill.macAddress, 'macAddress'),
+      spec('Brand', fill.brand, 'brand'),
+      spec('Model', fill.model, 'model'),
+      spec('Processor', fill.processor, 'processor'),
+      spec('Motherboard', fill.motherboard, 'motherboard'),
+      spec('Operating system', fill.operatingSystem, 'operatingSystem'),
+      spec('OS version', fill.osVersion, 'osVersion'),
+      spec('OS install date', fill.osInstallDate, 'osInstallDate'),
+    ]);
+    fillHardwareRows(
+      editHardware, fill.components,
+      c => ({ type: c.type, slotOrBay: c.slotOrBay ?? '', brand: c.brand ?? '', model: c.model ?? '', serialNumber: c.serialNumber ?? '', capacity: c.capacity ?? '', storageKind: c.storageKind }),
+      rows => (editHardware = rows), result,
+    );
+    const suggested = computerCategoryFor(cats, fill.deviceType);
+    if (suggested && suggested !== editForm.categoryId && /laptop|notebook/i.test(editCategoryName) !== (fill.deviceType === 'laptop')) {
+      result.differs.push({ label: 'Category', current: editCategoryName, report: cats.find(c => c.id === suggested)?.name ?? '', use: () => (editForm.categoryId = suggested) });
+    }
+    return result;
   }
 
   async function saveEdit() {
@@ -502,7 +535,7 @@
         purchaseDate: editForm.purchaseDate || null,
         vendor: editForm.vendor.trim() || null,
         internalNotes: editForm.internalNotes.trim() || null,
-        ...(editIsComputer ? { computerName: text(editSpecs.computerName) || null } : {}),
+        ...(editIsComputer ? { computerName: text(editSpecs.computerName) || null, macAddress: text(editSpecs.macAddress) || null } : {}),
         ...(editIsPhone ? { imeiNumber: text(editSpecs.imeiNumber) || null } : {}),
         ...(editIsPhone || editIsPeripheral ? { propertyTag: text(editSpecs.propertyTag) || null } : {}),
       });
@@ -1409,8 +1442,10 @@
           {#if editIsComputer}
             <div class="form-section">
               <h3 class="form-section-title">Computer / Laptop Specs</h3>
+              <BelarcFillButton apply={applyBelarc} undo={() => undoBelarc()} disabled={editSaving} />
               <div class="form-2col">
                 <div class="form-row"><label class="form-label" for="e-netname">Computer Name</label><input id="e-netname" class="form-input" type="text" bind:value={editSpecs.computerName} placeholder="e.g. Finance-LT-014" /></div>
+                <div class="form-row"><label class="form-label" for="e-mac">MAC Address</label><input id="e-mac" class="form-input" type="text" bind:value={editSpecs.macAddress} placeholder="e.g. 50:EB:F6:4A:7C:0C" /></div>
                 <div class="form-row"><label class="form-label" for="e-brand">Brand</label><input id="e-brand" class="form-input" type="text" bind:value={editSpecs.brand} /></div>
                 <div class="form-row"><label class="form-label" for="e-model">Model</label><input id="e-model" class="form-input" type="text" bind:value={editSpecs.model} /></div>
                 <div class="form-row"><label class="form-label" for="e-cpu">Processor</label><input id="e-cpu" class="form-input" type="text" bind:value={editSpecs.processor} /></div>

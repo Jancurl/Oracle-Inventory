@@ -7,6 +7,8 @@
   import { authStore } from '$lib/stores/auth.svelte';
   import DatePicker from '$lib/components/date/DatePicker.svelte';
   import { shrinkPhoto } from '$lib/utils/photo';
+  import BelarcFillButton from '$lib/components/BelarcFillButton.svelte';
+  import { computerCategoryFor, fillBlanks, fillHardwareRows, type BelarcReading } from '$lib/utils/belarc';
 
   interface Category { id: string; name: string; }
   interface Branch   { id: string; name: string; }
@@ -291,6 +293,7 @@
   let ciOperatingSystem = $state('');
   let ciOsVersion       = $state('');
   let ciOsInstallDate   = $state('');
+  let ciMacAddress      = $state('');
   let ciEmployeeId      = $state('');
   let ciComponents      = $state<CiComponent[]>([]);
 
@@ -321,6 +324,42 @@
       const lookup = await api.get<{ employees: CiOption[] }>('/api/computer-intake/lookups');
       ciEmployees = lookup.employees;
     } catch (e) { ciError = (e as Error).message; }
+  }
+
+  // ── Fill from a Belarc Advisor report: empty fields only, undoable ─────────
+  let undoBelarc = () => {};
+  function applyBelarc({ fill }: BelarcReading) {
+    const before = {
+      assetName, serialNumber, categoryId, ciComputerName, ciMacAddress, ciBrand, ciModel, ciProcessor,
+      ciMotherboard, ciOperatingSystem, ciOsVersion, ciOsInstallDate, ciComponents: ciComponents.map(c => ({ ...c })),
+    };
+    undoBelarc = () => {
+      assetName = before.assetName; serialNumber = before.serialNumber; categoryId = before.categoryId;
+      ciComputerName = before.ciComputerName; ciMacAddress = before.ciMacAddress; ciBrand = before.ciBrand; ciModel = before.ciModel;
+      ciProcessor = before.ciProcessor; ciMotherboard = before.ciMotherboard; ciOperatingSystem = before.ciOperatingSystem;
+      ciOsVersion = before.ciOsVersion; ciOsInstallDate = before.ciOsInstallDate; ciComponents = before.ciComponents;
+    };
+    const result = fillBlanks([
+      { label: 'Asset name',       value: fill.name,            get: () => assetName,         set: v => (assetName = v) },
+      { label: 'Serial number',    value: fill.serialNumber,    get: () => serialNumber,      set: v => (serialNumber = v) },
+      { label: 'Computer name',    value: fill.computerName,    get: () => ciComputerName,    set: v => (ciComputerName = v) },
+      { label: 'MAC address',      value: fill.macAddress,      get: () => ciMacAddress,      set: v => (ciMacAddress = v) },
+      { label: 'Brand',            value: fill.brand,           get: () => ciBrand,           set: v => (ciBrand = v) },
+      { label: 'Model',            value: fill.model,           get: () => ciModel,           set: v => (ciModel = v) },
+      { label: 'Processor',        value: fill.processor,       get: () => ciProcessor,       set: v => (ciProcessor = v) },
+      { label: 'Motherboard',      value: fill.motherboard,     get: () => ciMotherboard,     set: v => (ciMotherboard = v) },
+      { label: 'Operating system', value: fill.operatingSystem, get: () => ciOperatingSystem, set: v => (ciOperatingSystem = v) },
+      { label: 'OS version',       value: fill.osVersion,       get: () => ciOsVersion,       set: v => (ciOsVersion = v) },
+      { label: 'OS install date',  value: fill.osInstallDate,   get: () => ciOsInstallDate,   set: v => (ciOsInstallDate = v) },
+    ]);
+    fillHardwareRows(ciComponents, fill.components, c => ({ ...c }), rows => (ciComponents = rows), result);
+    // A laptop report on a Desktop category (or the other way round)
+    const suggested = computerCategoryFor(categories, fill.deviceType);
+    const current = categories.find(c => c.id === categoryId)?.name ?? '';
+    if (suggested && suggested !== categoryId && /laptop|notebook/i.test(current) !== (fill.deviceType === 'laptop')) {
+      result.differs.push({ label: 'Category', current, report: categories.find(c => c.id === suggested)?.name ?? '', use: () => (categoryId = suggested) });
+    }
+    return result;
   }
 
   function ciAddComponent(type: 'ram' | 'storage') { ciComponents = [...ciComponents, { type }]; }
@@ -395,8 +434,8 @@
     }
 
     const assetId = savedAssetId;
-    // The intake API has no vendor, internal notes or maintenance date; they are saved on the asset itself.
-    if (vendor.trim() || internalNotes.trim() || (enableMaintenance && nextMaintenance)) {
+    // The intake API has no vendor, internal notes, maintenance date or MAC address; they are saved on the asset itself.
+    if (vendor.trim() || internalNotes.trim() || (enableMaintenance && nextMaintenance) || ciMacAddress.trim()) {
       await once('details', () => api.put(`/api/assets/${assetId}`, plainAssetBody()));
     }
     await uploadFiles(assetId);
@@ -421,6 +460,7 @@
                              : isPeripheralCategory && periphPropertyTag.trim() ? periphPropertyTag.trim() : null,
       vendor:             vendor.trim() || null,
       internalNotes:      internalNotes.trim() || null,
+      ...(isComputerCategory && ciMacAddress.trim() ? { macAddress: ciMacAddress.trim() } : {}),
     };
   }
 
@@ -876,7 +916,9 @@
             {#if !computerAllowed}
               <div class="form-notice form-notice-muted">You need Admin or Super Admin access with inventory creation permission to fill in computer specs. This asset will be saved without them.</div>
             {:else}
-              <p class="ci-hint">This section appears because the category above is Computer or Laptop. Change the category and it disappears — no data is lost. Asset Tag is assigned automatically on save.</p>
+              <p class="ci-hint">This section appears because the category above is Computer or Laptop. Change the category and it disappears — no data is lost. Asset Tag is assigned automatically on save. Adding many computers? Use <a href="/assets/belarc">Import Belarc reports</a>.</p>
+
+              <BelarcFillButton apply={applyBelarc} undo={() => undoBelarc()} warnExisting disabled={submitting} />
 
               {#if duplicateComputerNameWarning}
                 <div class="form-warning" role="alert">This computer name already exists in the branch. Submit again to save it anyway as a separate device.</div>
@@ -890,6 +932,10 @@
                   <div class="field">
                     <label class="field-label" for="ci-netname">Computer Name</label>
                     <input id="ci-netname" class="field-input" bind:value={ciComputerName} placeholder="e.g. Finance-LT-014" />
+                  </div>
+                  <div class="field">
+                    <label class="field-label" for="ci-mac">MAC Address</label>
+                    <input id="ci-mac" class="field-input" bind:value={ciMacAddress} placeholder="e.g. 50:EB:F6:4A:7C:0C" />
                   </div>
                   <div class="field">
                     <label class="field-label" for="ci-brand">Brand</label>

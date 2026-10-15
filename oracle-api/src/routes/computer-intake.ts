@@ -12,7 +12,7 @@ const fields = new Set(["assetTag","computerName","categoryId","branchId","owner
 const componentFields = new Set(["type","slotOrBay","brand","model","serialNumber","capacity","storageKind"]);
 type Intake = Record<string, any>;
 function record(v: unknown): v is Record<string, unknown> { return !!v && typeof v === "object" && !Array.isArray(v); }
-function secret(v: unknown): boolean {
+export function secret(v: unknown): boolean {
   if (typeof v === "string") return blockedValue.test(v);
   if (!record(v)) return false;
   return Object.entries(v).some(([key, value]) => blockedKey.test(key) || secret(value));
@@ -73,7 +73,7 @@ function idempotency(req: AuthRequest) { const value = req.header("Idempotency-K
 function payloadHash(value: unknown) { return createHash("sha256").update(JSON.stringify(value)).digest("hex"); }
 export function submitPayload(value: unknown): Intake { if (!record(value)) return {}; const { expectedUpdatedAt: _expected, ifMatch: _ifMatch, idempotencyKey: _idempotencyKey, ...data } = value as Intake; return data; }
 async function normalizedAssetTagExists(tag: string) { const rows = await prisma.$queryRaw<Array<{ id: string }>>`SELECT "id" FROM "Asset" WHERE "assetTag" IS NOT NULL AND btrim("assetTag") <> '' AND lower(btrim("assetTag")) = lower(btrim(${tag})) LIMIT 1`; return rows.length > 0; }
-async function nextAssetTag(): Promise<string> {
+export async function nextAssetTag(): Promise<string> {
   const total = await prisma.asset.count();
   for (let attempt = 0; attempt < 10; attempt++) {
     const tag = `AT-${String(total + 1 + attempt).padStart(5, "0")}`;
