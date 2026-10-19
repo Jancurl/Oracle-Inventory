@@ -16,7 +16,6 @@
   let deploymentMode           = $state<typeof modes[number]>('routed_gateway');
   let haRole                   = $state<typeof roles[number]>('standalone');
   let policyOwner              = $state('');
-  let managementInterfaceId    = $state('');
   let configurationArtifactRef = $state('');
   let saving = $state(false);
   let error  = $state('');
@@ -42,7 +41,6 @@
       await api.put(`/api/firewalls/${assetId}/profile`, {
         deploymentMode, haRole,
         policyOwner: policyOwner.trim(),
-        managementInterfaceId: managementInterfaceId.trim() || undefined,
         configurationArtifactRef: configurationArtifactRef.trim() || undefined,
       }, { 'Idempotency-Key': crypto.randomUUID() });
       saved = true;
@@ -103,10 +101,6 @@
           <div class="field">
             <label class="field-label" for="owner">Policy Owner <span class="required">*</span></label>
             <input id="owner" class="field-input" bind:value={policyOwner} maxlength="160" />
-          </div>
-          <div class="field">
-            <label class="field-label" for="interface">Management Interface ID <span class="optional">(metadata reference)</span></label>
-            <input id="interface" class="field-input" bind:value={managementInterfaceId} autocomplete="off" />
           </div>
           <div class="field">
             <label class="field-label" for="artifact">Configuration Artifact Ref <span class="optional">(repo:// or vault:// only)</span></label>

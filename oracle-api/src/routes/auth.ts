@@ -15,6 +15,8 @@ const loginLimiter = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many login attempts. Try again in 15 minutes." },
+  // Local test databases only (.env.test.local); ignored whenever NODE_ENV is production.
+  skip: () => process.env.LOGIN_RATE_LIMIT_DISABLED === "true" && process.env.NODE_ENV !== "production",
 });
 
 const router = Router();

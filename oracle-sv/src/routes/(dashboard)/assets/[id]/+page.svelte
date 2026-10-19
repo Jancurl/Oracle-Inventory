@@ -595,19 +595,18 @@
   const SERVER_SPECS_ENABLED = false;
   const isCameraAsset   = $derived(/camera|cctv/i.test(asset?.category?.name ?? ''));
   const isRecorderAsset = $derived(/nvr|dvr|recorder/i.test(asset?.category?.name ?? ''));
-  const isNetworkAsset  = $derived(/access.?point|\bap\b|switch/i.test(asset?.category?.name ?? '') || (SERVER_SPECS_ENABLED && /firewall|server/i.test(asset?.category?.name ?? '')));
   const isServerAsset   = $derived(SERVER_SPECS_ENABLED && /server/i.test(asset?.category?.name ?? ''));
 
   interface CameraInfo { id: string; asset: { id: string }; physicalLocation: string; cameraType: string; resolution: string | null; nightVision: boolean | null; motionDetection: boolean | null; coverageArea?: string | null; installationDate?: string | null; notes?: string | null; assignments: { channel: { channelNumber: number; recorder: { assetId: string; physicalLocation: string } } }[]; }
   interface RecorderChannel { id: string; channelNumber: number; enabled: boolean; assignments: { camera: { asset: { id: string; name: string } } }[]; }
   interface RecorderInfo { id: string; assetId: string; physicalLocation: string; channelCapacity: number; recorderType?: string; storageCapacityBytes?: string | number | null; retentionDaysTarget?: number | null; notes?: string | null; channels: RecorderChannel[]; asset: { name: string }; }
-  interface NetIface { id: string; interfaceName: string; macAddress: string | null; }
-  interface IpObs { address: string; prefixLength: number; addressingMode: string; observedAt: string; }
+  type NetRef = { id: string; name: string } | null;
+  interface NetConnection { type: 'wired' | 'wifi'; switchPort: string | null; notes: string | null; isp: NetRef; pluggedInto: NetRef; switch: NetRef; managedSwitch: NetRef; firewall: NetRef; }
   interface ServerEntry { asset: { id: string }; environment: string; criticality: string; virtualizationRole: string; roles: { id: string; roleType: string; roleName: string | null; isPrimary: boolean; validFrom: string; validTo: string | null }[]; }
 
   let cameraInfo    = $state<CameraInfo | null>(null);
   let recorders     = $state<RecorderInfo[]>([]);
-  let netInterfaces = $state<(NetIface & { ips: IpObs[] })[]>([]);
+  let netConnection = $state<NetConnection | null>(null);
   let serverEntry   = $state<ServerEntry | null>(null);
   let infraLoading  = $state(false);
   let infraErr      = $state('');
@@ -623,12 +622,8 @@
         const list = await api.get<{ items: RecorderInfo[] }>('/api/cctv/recorders?pageSize=100');
         recorders = list.items;
       }
-      if (isNetworkAsset) {
-        const ifaces = await api.get<{ items: NetIface[] }>(`/api/network/interfaces?assetId=${assetId}`);
-        netInterfaces = await Promise.all(ifaces.items.map(async (i) => ({
-          ...i,
-          ips: await api.get<{ items: IpObs[] }>(`/api/network/interfaces/${i.id}/ip-observations`).then((r) => r.items).catch(() => []),
-        })));
+      if (isComputerAsset) {
+        netConnection = (await api.get<{ connection: NetConnection | null }>(`/api/network/map/computers/${assetId}`)).connection;
       }
       if (isServerAsset) {
         const list = await api.get<{ items: ServerEntry[] }>('/api/servers?pageSize=100');
@@ -1038,23 +1033,25 @@
           </div>
         {/if}
 
-        <!-- Network interfaces + IP -->
-        {#if isNetworkAsset}
+        <!-- Network connection (from the Network page map) -->
+        {#if isComputerAsset}
           <div class="rp-section" aria-labelledby="network-profile-title">
             <div class="section-head"><span class="section-title" id="network-profile-title">Network</span></div>
-            {#if netInterfaces.length === 0}
-              <div class="act-empty">No interfaces recorded yet. Add one from <a href="/inventory/intake/network?asset={assetId}">Network Intake</a>.</div>
+            {#if !netConnection}
+              <div class="act-empty">Not set yet. Record its switch port and ISP on the <a href="/network">Network</a> page.</div>
             {:else}
-              <div class="component-list" aria-label="Network interfaces">
-                {#each netInterfaces as iface}
-                  <div class="component-item">
-                    <strong>{iface.interfaceName}</strong>
-                    <span>{iface.macAddress ?? 'No MAC'}</span>
-                    <span>{iface.ips[0] ? `${iface.ips[0].address}/${iface.ips[0].prefixLength} (${iface.ips[0].addressingMode})` : 'No IP recorded'}</span>
-                  </div>
-                {/each}
+              <div class="component-list" aria-label="Network connection">
+                <div class="component-item"><strong>Connection</strong><span>{netConnection.type === 'wired' ? 'Wired' : 'Wi-Fi'}</span></div>
+                {#if netConnection.type === 'wired'}
+                  <div class="component-item"><strong>Port</strong><span>{netConnection.switchPort ?? '—'} on {netConnection.pluggedInto?.name ?? '—'}</span></div>
+                  <div class="component-item"><strong>Switch</strong><span>{netConnection.switch?.name ?? '—'}</span></div>
+                  <div class="component-item"><strong>Managed switch</strong><span>{netConnection.managedSwitch?.name ?? '—'}</span></div>
+                  <div class="component-item"><strong>Firewall</strong><span>{netConnection.firewall?.name ?? '—'}</span></div>
+                {/if}
+                <div class="component-item"><strong>ISP</strong><span>{netConnection.isp?.name ?? '—'}</span></div>
+                {#if netConnection.notes}<div class="component-item"><strong>Notes</strong><span>{netConnection.notes}</span></div>{/if}
               </div>
-              <a class="link-add-more" href="/inventory/intake/network?asset={assetId}">+ Add another interface or IP</a>
+              <a class="link-add-more" href="/network">Change on the Network page</a>
             {/if}
           </div>
         {/if}
