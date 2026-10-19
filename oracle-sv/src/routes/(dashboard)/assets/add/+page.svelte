@@ -1014,7 +1014,7 @@
             <h2 class="card-title">Access Point Specs</h2>
           </div>
           <div class="card-body">
-            <p class="ci-hint">Physical location only here. IP address and VLAN are recorded from <a href="/inventory/intake/network">Network Intake</a> after this asset is saved; login credentials are linked from the asset's own page.</p>
+            <p class="ci-hint">Physical location only here. Login credentials are saved from the <a href="/network">Network</a> page after this asset is saved.</p>
             <div class="fields-grid">
               <div class="field">
                 <label class="field-label" for="ap-location">Physical Location <span class="required">*</span></label>
@@ -1036,7 +1036,7 @@
             <h2 class="card-title">Switch Specs</h2>
           </div>
           <div class="card-body">
-            <p class="ci-hint">Port assignments and IP address are recorded from <a href="/inventory/intake/network">Network Intake</a> after this asset is saved; login credentials are linked from the asset's own page.</p>
+            <p class="ci-hint">Physical location only here. Add it to the <a href="/network">network map</a> to record which computers plug into it; login credentials are saved from the same page.</p>
             <div class="fields-grid">
               <div class="field">
                 <label class="field-label" for="sw-type">Switch Type</label>
@@ -1203,7 +1203,7 @@
             <h2 class="card-title">Server Specs</h2>
           </div>
           <div class="card-body">
-            <p class="ci-hint">HDD rows go in the Peripherals section below (type: Docking Station / External HDD, or add a storage row). IP address is recorded from <a href="/inventory/intake/network">Network Intake</a>; ISP circuits and login credentials are linked from the Servers &amp; Circuits page after this asset is saved.</p>
+            <p class="ci-hint">HDD rows go in the Peripherals section below (type: Docking Station / External HDD, or add a storage row). Which switch port and ISP it uses is recorded on the <a href="/network">Network</a> page; ISP circuits and login credentials are linked from the Servers &amp; Circuits page after this asset is saved.</p>
             <div class="fields-grid">
               <div class="field">
                 <label class="field-label" for="srv-env">Environment</label>
