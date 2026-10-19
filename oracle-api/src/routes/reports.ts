@@ -64,7 +64,7 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
 
   // Every aggregate below is independent, so they run together instead of one
   // database round trip after another.
-  const [totalAssets, forRepair, forDisposal, assignedAssets, movementsByMonth, allAssets, activeAssignments, recentMovements] = await Promise.all([
+  const [totalAssets, forRepair, forDisposal, assignedAssets, movementsByMonth, allAssets, activeAssignments, recentMovements, branches] = await Promise.all([
     prisma.asset.count({ where: assetWhere }),
     prisma.asset.count({ where: { ...assetWhere, condition: "for_repair" } }),
     prisma.asset.count({ where: { ...assetWhere, condition: "for_disposal" } }),
@@ -90,8 +90,9 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
       where: { status: "active", ...assignAssetFilter },
       select: {
         assetId: true,
+        asset: { select: { branchId: true, category: { select: { name: true } } } },
         employee: {
-          select: { id: true, department: { select: { name: true } } },
+          select: { id: true, branchId: true, department: { select: { name: true } } },
         },
       },
     }),
@@ -111,6 +112,8 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
         employee: { select: { name: true } },
       },
     }),
+    // Branches for the per-branch department breakdown, A–Z like the Branches page
+    prisma.branch.findMany({ where: { archivedAt: null }, select: { id: true, name: true }, orderBy: { name: "asc" } }),
   ]);
 
   // Top categories by asset count
@@ -140,17 +143,30 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
   }
   const branchStats = [...branchMap.values()].sort((a, b) => b.total - a.total);
 
-  const deptMap = new Map<string, { name: string; assets: number; employees: Set<string> }>();
-  for (const a of activeAssignments) {
-    const name = a.employee?.department?.name ?? "No department";
-    if (!deptMap.has(name)) deptMap.set(name, { name, assets: 0, employees: new Set() });
-    const entry = deptMap.get(name)!;
-    entry.assets++;
-    if (a.employee) entry.employees.add(a.employee.id);
+  function deptBreakdown(rows: typeof activeAssignments) {
+    const deptMap = new Map<string, { name: string; assets: number; employees: Set<string>; categories: Record<string, number> }>();
+    for (const a of rows) {
+      const name = a.employee?.department?.name ?? "No department";
+      const category = a.asset.category?.name ?? "Uncategorized";
+      if (!deptMap.has(name)) deptMap.set(name, { name, assets: 0, employees: new Set(), categories: {} });
+      const entry = deptMap.get(name)!;
+      entry.assets++;
+      entry.categories[category] = (entry.categories[category] ?? 0) + 1;
+      if (a.employee) entry.employees.add(a.employee.id);
+    }
+    return [...deptMap.values()]
+      .map((d) => ({ name: d.name, assets: d.assets, employees: d.employees.size, categories: d.categories }))
+      .sort((a, b) => b.assets - a.assets);
   }
-  const deptStats = [...deptMap.values()]
-    .map((d) => ({ name: d.name, assets: d.assets, employees: d.employees.size }))
-    .sort((a, b) => b.assets - a.assets);
+  const deptStats = deptBreakdown(activeAssignments);
+
+  // The same breakdown per branch. A held asset counts toward the branch of
+  // the employee holding it — where it actually is — or the asset's own
+  // branch when that employee has none.
+  const deptStatsByBranch = branches.map((b) => {
+    const held = activeAssignments.filter((a) => (a.employee?.branchId ?? a.asset.branchId) === b.id);
+    return { id: b.id, name: b.name, assets: held.length, departments: deptBreakdown(held) };
+  });
 
   res.json({
     kpi: {
@@ -164,6 +180,7 @@ router.get("/summary", requirePermission("view_reports"), async (req: AuthReques
     topCategories,
     branchStats,
     deptStats,
+    deptStatsByBranch,
     recentMovements: recentMovements.map((m) => ({
       id: m.id,
       type: m.type,
@@ -200,11 +217,10 @@ router.get("/infrastructure-summary", requirePermission("view_reports"), async (
     return Boolean(override?.enabled ?? (feature.enabledGlobally && feature.status === "enabled"));
   }
 
-  const [cctvOn, networkOn, infraOn, pendingMismatches] = await Promise.all([
+  const [cctvOn, networkOn, infraOn] = await Promise.all([
     featureOn("cctv.nvr.v1", "CCTV_NVR_ENABLED"),
     featureOn("network.v1", "NETWORK_INFRA_ENABLED"),
     featureOn("servers.firewall.isp.v1", "SERVERS_FIREWALL_ISP_ENABLED"),
-    prisma.hardwareScan.count({ where: { isBaseline: false, overallStatus: "mismatch", status: "pending" } }),
   ]);
 
   const [cctv, network, infrastructure] = await Promise.all([
@@ -232,7 +248,6 @@ router.get("/infrastructure-summary", requirePermission("view_reports"), async (
   ]);
 
   res.json({
-    hardwareAudit: { pendingMismatches },
     cctv,
     network,
     infrastructure,

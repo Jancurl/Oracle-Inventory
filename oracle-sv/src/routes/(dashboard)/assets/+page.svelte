@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount, onDestroy } from 'svelte';
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import { slide } from 'svelte/transition';
   import { api } from '$lib/api';
   import { can } from '$lib/utils/permissions';
@@ -77,7 +78,16 @@
     }
   }
 
-  onMount(() => { void loadAssets(); });
+  onMount(() => {
+    // /assets?condition=for_repair (the dashboard cards link here) opens the
+    // list already filtered, with the filter bar showing why
+    const condition = $page.url.searchParams.get('condition');
+    if (condition === 'usable' || condition === 'for_repair' || condition === 'for_disposal') {
+      filterCondition = condition;
+      showFilters = true;
+    }
+    void loadAssets();
+  });
   onDestroy(onChange(['Asset', 'Assignment'], () => loadAssets()));
 
   // ── Core state ───────────────────────────────────────────────────────────────

@@ -21,7 +21,9 @@ router.get("/interfaces", requireAuth, requirePermission("view_inventory"), asyn
   const user = await prisma.systemUser.findUnique({ where: { id: req.user!.id }, select: { branchId: true, role: { select: { name: true } } } }); const superAdmin = user?.role?.name?.toLowerCase() === "super_admin";
   if (!superAdmin && !user?.branchId) { res.json({ items: [], page: 1, pageSize: 20, total: 0 }); return; }
   const assetId = typeof req.query.assetId === "string" ? req.query.assetId : undefined; const page = Math.max(1, Number(req.query.page) || 1); const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
-  const where = { ...(assetId ? { assetId } : {}), ...(!superAdmin ? { asset: { branchId: user!.branchId! } } : {}) };
+  // branchId narrows a Super Admin's list to one branch; everyone else is held to their own branch anyway
+  const branchId = typeof req.query.branchId === "string" ? req.query.branchId : undefined;
+  const where = { ...(assetId ? { assetId } : {}), ...(!superAdmin ? { asset: { branchId: user!.branchId! } } : branchId ? { asset: { branchId } } : {}) };
   const [items, total] = await Promise.all([prisma.networkInterface.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { updatedAt: "desc" }, include: { asset: { select: { name: true, assetTag: true } } } }), prisma.networkInterface.count({ where })]); res.json({ items, page, pageSize, total });
 });
 
@@ -29,7 +31,9 @@ router.get("/ports", requireAuth, requirePermission("view_inventory"), async (re
   const user = await prisma.systemUser.findUnique({ where: { id: req.user!.id }, select: { branchId: true, role: { select: { name: true } } } }); const superAdmin = user?.role?.name?.toLowerCase() === "super_admin";
   if (!superAdmin && !user?.branchId) { res.json({ items: [], page: 1, pageSize: 20, total: 0 }); return; }
   const assetId = typeof req.query.assetId === "string" ? req.query.assetId : undefined; const page = Math.max(1, Number(req.query.page) || 1); const pageSize = Math.min(100, Math.max(1, Number(req.query.pageSize) || 20));
-  const where = { ...(assetId ? { assetId } : {}), ...(!superAdmin ? { asset: { branchId: user!.branchId! } } : {}) };
+  // branchId narrows a Super Admin's list to one branch; everyone else is held to their own branch anyway
+  const branchId = typeof req.query.branchId === "string" ? req.query.branchId : undefined;
+  const where = { ...(assetId ? { assetId } : {}), ...(!superAdmin ? { asset: { branchId: user!.branchId! } } : branchId ? { asset: { branchId } } : {}) };
   const [items, total] = await Promise.all([prisma.networkPort.findMany({ where, skip: (page - 1) * pageSize, take: pageSize, orderBy: { updatedAt: "desc" }, include: { asset: { select: { name: true, assetTag: true } } } }), prisma.networkPort.count({ where })]); res.json({ items, page, pageSize, total });
 });
 

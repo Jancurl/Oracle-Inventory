@@ -1,15 +1,14 @@
 /**
  * Belarc Advisor HTML report parsing — shared types.
  *
- * The ParsedSpecs JSON shape is stored on HardwareScan.parsedSpecs (Phase B)
- * and diffed field-by-field by the comparison engine (Phase C). Field keys
- * must therefore be stable across scans of the same machine.
+ * parseBelarc() turns a report into these sections and fields; the Belarc
+ * import (toInventory.ts) reads the computer's hardware from them by key.
  */
 
-/** Drives comparison behavior (Phase C):
- *  hard  → difference is a mismatch (red)
- *  soft  → difference is a warning (yellow)
- *  skip  → parsed for display, never compared
+/** How much a field is expected to change between two reports of the same machine:
+ *  hard  → identity or installed hardware; should not change
+ *  soft  → may legitimately change (OS build, monitors, antivirus)
+ *  skip  → changes on every report (free space, battery health)
  */
 export type VolatilityTier = 'hard' | 'soft' | 'skip';
 
