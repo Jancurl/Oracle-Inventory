@@ -28,31 +28,48 @@ export function requireAuth(req: AuthRequest, res: Response, next: NextFunction)
   }
 }
 
+type AccessRow = { roleName: string | null; key: string | null; granted: boolean | null; fromOverride: boolean };
+
+// Loads the user's role and effective permissions in ONE query and caches the
+// result on the request, so routes stacking several requirePermission /
+// requireSuperAdmin checks only hit the database once. (The nested Prisma
+// include this replaces issued six sequential queries per check.)
+// Returns false when the user no longer exists.
+async function loadAccess(req: AuthRequest): Promise<boolean> {
+  if (req.isSuperAdmin !== undefined) return true;
+  const rows = await prisma.$queryRaw<AccessRow[]>`
+    SELECT r."name" AS "roleName", p."key", NULL::boolean AS "granted", false AS "fromOverride"
+      FROM "SystemUser" u
+      LEFT JOIN "Role" r ON r."id" = u."roleId"
+      LEFT JOIN "RolePermission" rp ON rp."roleId" = r."id"
+      LEFT JOIN "Permission" p ON p."id" = rp."permissionId"
+     WHERE u."id" = ${req.user!.id}
+    UNION ALL
+    SELECT NULL, p."key", up."granted", true
+      FROM "UserPermission" up
+      JOIN "Permission" p ON p."id" = up."permissionId"
+     WHERE up."userId" = ${req.user!.id}`;
+  const roleRows = rows.filter((r) => !r.fromOverride);
+  if (roleRows.length === 0) return false;
+  req.isSuperAdmin = roleRows[0].roleName?.trim().toLowerCase() === "super_admin";
+  if (req.isSuperAdmin) return true;
+  const rolePerms = roleRows.map((r) => r.key).filter((k): k is string => Boolean(k));
+  const overrides = rows.filter((r) => r.fromOverride && r.key);
+  const granted = overrides.filter((r) => r.granted).map((r) => r.key!);
+  const revoked = new Set(overrides.filter((r) => !r.granted).map((r) => r.key!));
+  req.permissions = [...new Set([...rolePerms, ...granted])].filter((k) => !revoked.has(k));
+  return true;
+}
+
 /** Load permissions from DB and attach to req. Call after requireAuth. */
 export function requirePermission(key: string) {
   return async (req: AuthRequest, res: Response, next: NextFunction) => {
     if (!req.user) { res.status(401).json({ error: "Unauthorized" }); return; }
-
-    if (!req.permissions) {
-      const user = await prisma.systemUser.findUnique({
-        where: { id: req.user.id },
-        include: {
-          role: { include: { permissions: { include: { permission: true } } } },
-          permissionOverrides: { include: { permission: true } },
-        },
-      });
-      if (!user) { res.status(401).json({ error: "User not found" }); return; }
-
-      const isSuperAdmin = user.role?.name?.trim().toLowerCase() === "super_admin";
-      req.isSuperAdmin = isSuperAdmin;
-      if (isSuperAdmin) { next(); return; }
-      const rolePerms = user.role?.permissions.map((rp) => rp.permission.key) ?? [];
-      const granted = user.permissionOverrides.filter((up) => up.granted).map((up) => up.permission.key);
-      const revoked = new Set(user.permissionOverrides.filter((up) => !up.granted).map((up) => up.permission.key));
-      req.permissions = [...new Set([...rolePerms, ...granted])].filter((k) => !revoked.has(k));
-    }
-
-    if (!req.permissions.includes(key)) {
+    try {
+      if (!(await loadAccess(req))) { res.status(401).json({ error: "User not found" }); return; }
+    } catch (error) { next(error); return; }
+    if (req.isSuperAdmin) { next(); return; }
+    if (!req.permissions!.includes(key)) {
       res.status(403).json({ error: "Forbidden: missing permission " + key });
       return;
     }
@@ -62,9 +79,9 @@ export function requirePermission(key: string) {
 
 export async function requireSuperAdmin(req: AuthRequest, res: Response, next: NextFunction) {
   if (!req.user) { res.status(401).json({ error: "Unauthorized" }); return; }
-  const user = await prisma.systemUser.findUnique({ where: { id: req.user.id }, include: { role: true } });
-  if (!user) { res.status(401).json({ error: "User not found" }); return; }
-  req.isSuperAdmin = user.role?.name?.trim().toLowerCase() === "super_admin";
+  try {
+    if (!(await loadAccess(req))) { res.status(401).json({ error: "User not found" }); return; }
+  } catch (error) { next(error); return; }
   if (!req.isSuperAdmin) { res.status(403).json({ error: "Only a Super Admin can perform this action." }); return; }
   next();
 }

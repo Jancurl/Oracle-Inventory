@@ -6,7 +6,10 @@ const config = {
   preprocess: vitePreprocess(),
   kit: {
     adapter: adapter({
-      runtime: 'nodejs24.x'
+      runtime: 'nodejs24.x',
+      // Tokyo, next to the Supabase database (ap-northeast-1). Vercel's
+      // default is iad1 (US East), which put every query across the Pacific.
+      regions: ['hnd1']
     })
   }
 };

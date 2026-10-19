@@ -4,7 +4,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 const state = vi.hoisted(() => ({ role: "admin" }));
 const fakePrisma = vi.hoisted(() => ({
-  systemUser: { findUnique: vi.fn(async () => ({ id: "user-1", role: { name: state.role } })) },
+  // The middleware loads role + permissions in one raw query (one row per role permission).
+  $queryRaw: vi.fn(async () => [{ roleName: state.role, key: null, granted: null, fromOverride: false }]),
 }));
 
 vi.mock("../../lib/prisma", () => ({ prisma: fakePrisma }));
@@ -31,6 +32,6 @@ describe("production Super Admin middleware", () => {
     expect(await checkRole()).toBe(403);
     state.role = "super_admin";
     expect(await checkRole()).toBe(200);
-    expect(fakePrisma.systemUser.findUnique).toHaveBeenCalledTimes(2);
+    expect(fakePrisma.$queryRaw).toHaveBeenCalledTimes(2);
   });
 });
