@@ -84,8 +84,9 @@ router.get("/", requireAuth, requirePermission("view_inventory"), async (req: Au
       prisma.asset.findMany({
         where: { ...(branchId ? { branchId } : {}), status: "active", category: { name: { in: COMPUTER_CATEGORIES } } },
         select: {
-          id: true, name: true, assetTag: true, computerName: true, branchId: true,
+          id: true, name: true, assetTag: true, computerName: true, serialNumber: true, branchId: true,
           category: { select: { name: true } },
+          deviceProfile: { select: { brand: true, model: true, deviceSerial: true } },
           branch: { select: { name: true } },
           networkConnection: { select: { connectionType: true, switchId: true, switchPort: true, ispId: true, notes: true, updatedAt: true } },
           assignments: {
@@ -109,6 +110,7 @@ router.get("/", requireAuth, requirePermission("view_inventory"), async (req: Au
       nodes: nodes.map((n) => ({
         id: n.id, branchId: n.branchId, branchName: n.branch.name, type: n.type, name: n.name,
         parentId: n.parentId, parentPort: n.parentPort, portCount: n.portCount, location: n.location, notes: n.notes,
+        brand: n.brand, model: n.model, serialNumber: n.serialNumber,
         computers: count.get(n.id) ?? 0,
       })),
       computers: computers.map((c) => {
@@ -116,6 +118,8 @@ router.get("/", requireAuth, requirePermission("view_inventory"), async (req: Au
         const employee = c.assignments[0]?.employee ?? null;
         return {
           id: c.id, name: c.name, assetTag: c.assetTag, computerName: c.computerName, category: c.category?.name ?? null,
+          brand: c.deviceProfile?.brand ?? null, model: c.deviceProfile?.model ?? null,
+          serialNumber: c.serialNumber ?? c.deviceProfile?.deviceSerial ?? null,
           branchId: c.branchId, branchName: c.branch?.name ?? null,
           employee: employee ? { id: employee.id, name: employee.name, position: employee.position, department: employee.department?.name ?? null } : null,
           connection: conn ? {
@@ -131,7 +135,7 @@ router.get("/", requireAuth, requirePermission("view_inventory"), async (req: Au
 
 // ── Nodes: ISPs, firewalls, managed switches, switches ──────────────────────
 
-type NodeData = { type: NetworkNodeType; name: string; branchId: string; parentId: string | null; parentPort: string | null; portCount: number | null; location: string | null; notes: string | null };
+type NodeData = { type: NetworkNodeType; name: string; branchId: string; parentId: string | null; parentPort: string | null; portCount: number | null; brand: string | null; model: string | null; serialNumber: string | null; location: string | null; notes: string | null };
 type NodeValidation = { data: NodeData; error?: never; field?: never; status?: never } | { data?: never; error: string; field?: string; status?: number };
 
 async function validateNode(me: Account, body: Record<string, unknown>, existing: { id: string; branchId: string } | null): Promise<NodeValidation> {
@@ -160,6 +164,9 @@ async function validateNode(me: Account, body: Record<string, unknown>, existing
       type, name, branchId, parentId: ALLOWED_PARENTS[type].length ? parentId : null,
       parentPort: parentId ? str(body.parentPort) || null : null,
       portCount: type === "isp" ? null : portCount,
+      brand: str(body.brand) || null,
+      model: str(body.model) || null,
+      serialNumber: str(body.serialNumber) || null,
       location: str(body.location) || null,
       notes: str(body.notes) || null,
     },
