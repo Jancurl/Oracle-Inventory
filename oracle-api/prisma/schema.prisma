@@ -375,6 +375,9 @@ model NetworkNode {
   // Port on the parent that this node's uplink cable plugs into.
   parentPort        String?
   portCount         Int?
+  brand             String?
+  model             String?
+  serialNumber      String?
   location          String?
   notes             String?
   createdAt         DateTime           @default(now())
